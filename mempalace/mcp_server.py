@@ -39,13 +39,21 @@ logger = logging.getLogger("mempalace_mcp")
 _config = MempalaceConfig()
 
 
+_client_cache = None
+_collection_cache = None
+
+
 def _get_collection(create=False):
-    """Return the ChromaDB collection, or None on failure."""
+    """Return the ChromaDB collection, caching the client between calls."""
+    global _client_cache, _collection_cache
     try:
-        client = chromadb.PersistentClient(path=_config.palace_path)
+        if _client_cache is None:
+            _client_cache = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            return client.get_or_create_collection(_config.collection_name)
-        return client.get_collection(_config.collection_name)
+            _collection_cache = _client_cache.get_or_create_collection(_config.collection_name)
+        elif _collection_cache is None:
+            _collection_cache = _client_cache.get_collection(_config.collection_name)
+        return _collection_cache
     except Exception:
         return None
 
