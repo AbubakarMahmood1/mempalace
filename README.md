@@ -112,7 +112,7 @@ Three mining modes: **projects** (code and docs), **convos** (conversation expor
 
 After the one-time setup (install → init → mine), you don't run MemPalace commands manually. Your AI uses it for you. There are two ways, depending on which AI you use.
 
-### With Claude, ChatGPT, Cursor (MCP-compatible tools)
+### With Claude, ChatGPT, Cursor, Gemini (MCP-compatible tools)
 
 ```bash
 # Connect MemPalace once
@@ -124,6 +124,8 @@ Now your AI has 19 tools available through MCP. Ask it anything:
 > *"What did we decide about auth last month?"*
 
 Claude calls `mempalace_search` automatically, gets verbatim results, and answers you. You never type `mempalace search` again. The AI handles it.
+
+MemPalace also works natively with **Gemini CLI** (which handles the server and save hooks automatically) — see the [Gemini CLI Integration Guide](examples/gemini_cli_setup.md).
 
 ### With local models (Llama, Mistral, or any offline LLM)
 
