@@ -13,6 +13,7 @@ Commands:
     mempalace split <dir>                 Split concatenated mega-files into per-session files
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
+    mempalace writing-export <dir>        Build a writing-process sidecar corpus
     mempalace search "query"              Find anything, exact words
     mempalace mcp                         Show MCP setup command
     mempalace wake-up                     Show L0 + L1 wake-up context
@@ -23,6 +24,7 @@ Examples:
     mempalace init ~/projects/my_app
     mempalace mine ~/projects/my_app
     mempalace mine ~/chats/claude-sessions --mode convos
+    mempalace writing-export ~/writing-vault --project Witcher-DC
     mempalace search "why did we switch to GraphQL"
     mempalace search "pricing discussion" --wing my_app --room costs
 """
@@ -155,6 +157,22 @@ def cmd_status(args):
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     status(palace_path=palace_path)
+
+
+def cmd_writing_export(args):
+    from .writing_export import export_writing_corpus, print_export_summary
+
+    summary = export_writing_corpus(
+        vault_dir=args.dir,
+        project=args.project,
+        out_dir=args.out,
+        codex_home=args.codex_home,
+        brainstorm_paths=args.brainstorms,
+        audit_paths=args.audits,
+        discarded_paths=args.discarded_paths,
+        dry_run=args.dry_run,
+    )
+    print_export_summary(summary, dry_run=args.dry_run)
 
 
 def cmd_repair(args):
@@ -450,6 +468,51 @@ def main():
     p_search.add_argument("--room", default=None, help="Limit to one room")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
 
+    # writing-export
+    p_writing_export = sub.add_parser(
+        "writing-export",
+        help="Build a writing-process sidecar corpus outside the live project",
+    )
+    p_writing_export.add_argument("dir", help="Vault root or project directory")
+    p_writing_export.add_argument(
+        "--project",
+        required=True,
+        help="Project name to export (for example: Witcher-DC)",
+    )
+    p_writing_export.add_argument(
+        "--out",
+        default=None,
+        help="Output directory (default: ~/.mempalace/staging/<project>)",
+    )
+    p_writing_export.add_argument(
+        "--codex-home",
+        default=None,
+        help="Codex home directory to scan for rollout JSONL (default: ~/.codex)",
+    )
+    p_writing_export.add_argument(
+        "--brainstorms",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the brainstorms room; repeat as needed",
+    )
+    p_writing_export.add_argument(
+        "--audits",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the audits room; repeat as needed",
+    )
+    p_writing_export.add_argument(
+        "--discarded-paths",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the discarded_paths room; repeat as needed",
+    )
+    p_writing_export.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be exported without writing files",
+    )
+
     # compress
     p_compress = sub.add_parser(
         "compress", help="Compress drawers using AAAK Dialect (~30x reduction)"
@@ -562,6 +625,7 @@ def main():
         "split": cmd_split,
         "search": cmd_search,
         "mcp": cmd_mcp,
+        "writing-export": cmd_writing_export,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
