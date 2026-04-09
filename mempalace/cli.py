@@ -14,6 +14,8 @@ Commands:
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
     mempalace writing-export <dir>        Build a writing-process sidecar corpus
+    mempalace writing-export <dir> --mine Export and mine into a dedicated sidecar palace
+    mempalace writing-sync <dir>          Export, mine, and optionally search a writing sidecar
     mempalace search "query"              Find anything, exact words
     mempalace mcp                         Show MCP setup command
     mempalace wake-up                     Show L0 + L1 wake-up context
@@ -25,6 +27,8 @@ Examples:
     mempalace mine ~/projects/my_app
     mempalace mine ~/chats/claude-sessions --mode convos
     mempalace writing-export ~/writing-vault --project Witcher-DC
+    mempalace writing-export ~/writing-vault --project Witcher-DC --mine
+    mempalace writing-sync ~/writing-vault --project Witcher-DC --query "Arthur sponsorship"
     mempalace search "why did we switch to GraphQL"
     mempalace search "pricing discussion" --wing my_app --room costs
 """
@@ -167,12 +171,57 @@ def cmd_writing_export(args):
         project=args.project,
         out_dir=args.out,
         codex_home=args.codex_home,
+        config_path=args.config,
         brainstorm_paths=args.brainstorms,
         audit_paths=args.audits,
         discarded_paths=args.discarded_paths,
+        mine_after_export=args.mine,
+        palace_path=args.sidecar_palace,
+        refresh_palace=args.refresh_palace,
         dry_run=args.dry_run,
     )
     print_export_summary(summary, dry_run=args.dry_run)
+
+
+def cmd_writing_sync(args):
+    from .searcher import SearchError, search
+    from .writing_export import (
+        _project_wing,
+        default_palace_dir,
+        export_writing_corpus,
+        print_export_summary,
+    )
+
+    palace_path = args.sidecar_palace or str(default_palace_dir(args.project))
+    summary = export_writing_corpus(
+        vault_dir=args.dir,
+        project=args.project,
+        out_dir=args.out,
+        codex_home=args.codex_home,
+        config_path=args.config,
+        brainstorm_paths=args.brainstorms,
+        audit_paths=args.audits,
+        discarded_paths=args.discarded_paths,
+        mine_after_export=True,
+        palace_path=palace_path,
+        refresh_palace=args.refresh_palace,
+        dry_run=False,
+    )
+    print_export_summary(summary, dry_run=False)
+
+    if not args.query:
+        return
+
+    try:
+        search(
+            query=args.query,
+            palace_path=summary["palace_path"] or palace_path,
+            wing=_project_wing(args.project),
+            room=args.room,
+            n_results=args.results,
+        )
+    except SearchError:
+        sys.exit(1)
 
 
 def cmd_repair(args):
@@ -490,6 +539,11 @@ def main():
         help="Codex home directory to scan for rollout JSONL (default: ~/.codex)",
     )
     p_writing_export.add_argument(
+        "--config",
+        default=None,
+        help="Optional writing-sidecar YAML config with extra paths and chat match terms",
+    )
+    p_writing_export.add_argument(
         "--brainstorms",
         action="append",
         default=[],
@@ -508,9 +562,95 @@ def main():
         help="Opt-in file or directory to export into the discarded_paths room; repeat as needed",
     )
     p_writing_export.add_argument(
+        "--mine",
+        action="store_true",
+        help="Mine the exported sidecar into a dedicated palace after export",
+    )
+    p_writing_export.add_argument(
+        "--sidecar-palace",
+        default=None,
+        help="Palace directory for --mine (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
+    )
+    p_writing_export.add_argument(
+        "--refresh-palace",
+        action="store_true",
+        help="If used with --mine, rebuild the target palace directory before mining",
+    )
+    p_writing_export.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be exported without writing files",
+    )
+
+    # writing-sync
+    p_writing_sync = sub.add_parser(
+        "writing-sync",
+        help="Export and mine a writing sidecar, then optionally run a search",
+    )
+    p_writing_sync.add_argument("dir", help="Vault root or project directory")
+    p_writing_sync.add_argument(
+        "--project",
+        required=True,
+        help="Project name to sync (for example: Witcher-DC)",
+    )
+    p_writing_sync.add_argument(
+        "--out",
+        default=None,
+        help="Output directory (default: ~/.mempalace/staging/<project>)",
+    )
+    p_writing_sync.add_argument(
+        "--codex-home",
+        default=None,
+        help="Codex home directory to scan for rollout JSONL (default: ~/.codex)",
+    )
+    p_writing_sync.add_argument(
+        "--config",
+        default=None,
+        help="Optional writing-sidecar YAML config with extra paths and chat match terms",
+    )
+    p_writing_sync.add_argument(
+        "--brainstorms",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the brainstorms room; repeat as needed",
+    )
+    p_writing_sync.add_argument(
+        "--audits",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the audits room; repeat as needed",
+    )
+    p_writing_sync.add_argument(
+        "--discarded-paths",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the discarded_paths room; repeat as needed",
+    )
+    p_writing_sync.add_argument(
+        "--sidecar-palace",
+        default=None,
+        help="Palace directory for the synced sidecar (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
+    )
+    p_writing_sync.add_argument(
+        "--refresh-palace",
+        action="store_true",
+        help="Rebuild the target palace directory before mining",
+    )
+    p_writing_sync.add_argument(
+        "--query",
+        default=None,
+        help="Optional search query to run after the sync finishes",
+    )
+    p_writing_sync.add_argument(
+        "--room",
+        default=None,
+        help="Optional room filter for the post-sync search",
+    )
+    p_writing_sync.add_argument(
+        "--results",
+        type=int,
+        default=5,
+        help="Number of post-sync search results to show",
     )
 
     # compress
@@ -626,6 +766,7 @@ def main():
         "search": cmd_search,
         "mcp": cmd_mcp,
         "writing-export": cmd_writing_export,
+        "writing-sync": cmd_writing_sync,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,

@@ -13,18 +13,26 @@ instead of the real user profile.
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 # ── Isolate HOME before any mempalace imports ──────────────────────────
 _original_env = {}
-_session_tmp = tempfile.mkdtemp(prefix="mempalace_session_")
+_repo_root = Path(__file__).resolve().parents[1]
+_test_tmp_root = Path(os.environ.get("MEMPALACE_TEST_TMPDIR", _repo_root / ".tmp-tests"))
+_test_tmp_root.mkdir(parents=True, exist_ok=True)
+_session_tmp = tempfile.mkdtemp(prefix="mempalace_session_", dir=str(_test_tmp_root))
 
-for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "TMP", "TEMP", "TMPDIR"):
     _original_env[_var] = os.environ.get(_var)
 
 os.environ["HOME"] = _session_tmp
 os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
+os.environ["TMP"] = _session_tmp
+os.environ["TEMP"] = _session_tmp
+os.environ["TMPDIR"] = _session_tmp
+tempfile.tempdir = _session_tmp
 
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
@@ -44,7 +52,7 @@ def _reset_mcp_cache():
 
             mcp_server._client_cache = None
             mcp_server._collection_cache = None
-        except (ImportError, AttributeError):
+        except Exception:
             pass
 
     _clear_cache()
@@ -66,6 +74,7 @@ def _isolate_home():
             os.environ.pop(var, None)
         else:
             os.environ[var] = orig
+    tempfile.tempdir = None
     shutil.rmtree(_session_tmp, ignore_errors=True)
 
 

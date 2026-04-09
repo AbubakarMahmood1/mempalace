@@ -13,11 +13,16 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Iterable
+
+import yaml
 
 from .normalize import normalize
 
 DEFAULT_CODEX_HOME = Path(os.path.expanduser("~/.codex"))
 DEFAULT_STAGING_ROOT = Path(os.path.expanduser("~/.mempalace/staging"))
+DEFAULT_PALACE_ROOT = Path(os.path.expanduser("~/.mempalace/palaces"))
+DEFAULT_WRITING_CONFIG_FILENAMES = ("writing-sidecar.yaml", "writing-sidecar.yml")
 FIXED_ROOMS = (
     "chat_process",
     "brainstorms",
@@ -28,6 +33,14 @@ FIXED_ROOMS = (
 )
 LIVE_GATEWAY_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
 LIVE_NOTES_FILES = {"05_Current_Notes.md", "05_Current_Chapter_Notes.md"}
+ROOM_DESCRIPTIONS = {
+    "chat_process": "Normalized AI conversations and process chatter tied to this project.",
+    "brainstorms": "Idea dumps, alternatives, and exploratory notes.",
+    "audits": "Review passes, criticism, and structured analysis.",
+    "discarded_paths": "Cut scenes, abandoned branches, and paths not chosen.",
+    "research": "Reference material and research notes safe to archive.",
+    "archived_notes": "Archived chapter notes and historical planning material.",
+}
 
 
 def resolve_project_root(vault_dir: str, project: str) -> Path:
@@ -52,8 +65,12 @@ def resolve_project_root(vault_dir: str, project: str) -> Path:
 
 def default_output_dir(project: str) -> Path:
     """Default staging directory for writing sidecars."""
-    slug = _safe_name(project.lower().replace(" ", "_").replace("-", "_"))
-    return DEFAULT_STAGING_ROOT / slug
+    return DEFAULT_STAGING_ROOT / _project_slug(project)
+
+
+def default_palace_dir(project: str) -> Path:
+    """Default palace directory for a writing sidecar."""
+    return DEFAULT_PALACE_ROOT / f"{_project_slug(project)}_writing_sidecar"
 
 
 def export_writing_corpus(
@@ -61,27 +78,60 @@ def export_writing_corpus(
     project: str,
     out_dir: str = None,
     codex_home: str = None,
+    config_path: str = None,
     brainstorm_paths=None,
     audit_paths=None,
     discarded_paths=None,
+    mine_after_export: bool = False,
+    palace_path: str = None,
+    refresh_palace: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """Export a curated writing-process corpus into fixed sidecar rooms."""
     project_root = resolve_project_root(vault_dir, project)
+    vault_root = resolve_vault_root(vault_dir, project_root)
     output_root = Path(out_dir).expanduser().resolve() if out_dir else default_output_dir(project)
     codex_root = Path(codex_home).expanduser().resolve() if codex_home else DEFAULT_CODEX_HOME
+    writing_config, loaded_config_path = _load_writing_export_config(project_root, config_path)
+    config_base_dir = loaded_config_path.parent if loaded_config_path else project_root
+    project_terms = _build_project_terms(
+        project,
+        project_root,
+        writing_config.get("chat_project_terms", []),
+    )
+    brainstorm_inputs = _merge_opt_in_paths(
+        config_base_dir,
+        writing_config.get("brainstorms", []),
+        brainstorm_paths or [],
+    )
+    audit_inputs = _merge_opt_in_paths(
+        config_base_dir,
+        writing_config.get("audits", []),
+        audit_paths or [],
+    )
+    discarded_inputs = _merge_opt_in_paths(
+        config_base_dir,
+        writing_config.get("discarded_paths", []),
+        discarded_paths or [],
+    )
 
     summary = {
         "project_root": str(project_root),
+        "vault_root": str(vault_root),
         "output_root": str(output_root),
         "rooms": {room: 0 for room in FIXED_ROOMS},
         "skipped_live_files": [],
         "skipped_missing_paths": [],
+        "loaded_config_path": str(loaded_config_path) if loaded_config_path else None,
+        "generated_config_path": str(output_root / "mempalace.yaml"),
+        "palace_path": None,
+        "mine_skipped": None,
     }
 
     if not dry_run:
         _ensure_dir(output_root)
         _write_export_gitignore(output_root)
+        _write_sidecar_config(output_root, project)
         for room in FIXED_ROOMS:
             room_dir = output_root / room
             if room_dir.exists():
@@ -91,6 +141,8 @@ def export_writing_corpus(
     _export_codex_chat_process(
         codex_root=codex_root,
         project_root=project_root,
+        vault_root=vault_root,
+        project_terms=project_terms,
         output_root=output_root,
         summary=summary,
         dry_run=dry_run,
@@ -113,7 +165,7 @@ def export_writing_corpus(
     )
 
     _copy_opt_in_paths(
-        raw_paths=brainstorm_paths or [],
+        raw_paths=brainstorm_inputs,
         room_name="brainstorms",
         output_root=output_root,
         project_root=project_root,
@@ -121,7 +173,7 @@ def export_writing_corpus(
         dry_run=dry_run,
     )
     _copy_opt_in_paths(
-        raw_paths=audit_paths or [],
+        raw_paths=audit_inputs,
         room_name="audits",
         output_root=output_root,
         project_root=project_root,
@@ -129,13 +181,28 @@ def export_writing_corpus(
         dry_run=dry_run,
     )
     _copy_opt_in_paths(
-        raw_paths=discarded_paths or [],
+        raw_paths=discarded_inputs,
         room_name="discarded_paths",
         output_root=output_root,
         project_root=project_root,
         summary=summary,
         dry_run=dry_run,
     )
+
+    if mine_after_export:
+        if dry_run:
+            summary["mine_skipped"] = "dry_run"
+        else:
+            target_palace = (
+                Path(palace_path).expanduser().resolve() if palace_path else default_palace_dir(project)
+            )
+            _mine_exported_sidecar(
+                output_root=output_root,
+                project=project,
+                palace_path=target_palace,
+                refresh_palace=refresh_palace,
+            )
+            summary["palace_path"] = str(target_palace)
 
     return summary
 
@@ -146,9 +213,18 @@ def print_export_summary(summary: dict, dry_run: bool = False):
     print("  MemPalace Writing Export")
     print(f"{'=' * 55}")
     print(f"  Project: {summary['project_root']}")
+    print(f"  Vault:   {summary['vault_root']}")
     print(f"  Output:  {summary['output_root']}")
     if dry_run:
         print("  DRY RUN — nothing was written")
+    if summary.get("loaded_config_path"):
+        print(f"  Config:  {summary['loaded_config_path']}")
+    elif summary.get("generated_config_path") and not dry_run:
+        print(f"  Config:  {summary['generated_config_path']}")
+    if summary.get("palace_path"):
+        print(f"  Palace:  {summary['palace_path']}")
+    if summary.get("mine_skipped") == "dry_run":
+        print("  Mine:    skipped because --dry-run was used")
     print("\n  By room:")
     for room, count in summary["rooms"].items():
         print(f"    {room:20} {count}")
@@ -166,6 +242,8 @@ def print_export_summary(summary: dict, dry_run: bool = False):
 def _export_codex_chat_process(
     codex_root: Path,
     project_root: Path,
+    vault_root: Path,
+    project_terms: list,
     output_root: Path,
     summary: dict,
     dry_run: bool,
@@ -176,7 +254,12 @@ def _export_codex_chat_process(
 
     room_dir = output_root / "chat_process"
     for rollout_path in sorted(sessions_root.rglob("*.jsonl")):
-        if not _rollout_matches_project(rollout_path, project_root):
+        if not _rollout_matches_project(
+            rollout_path,
+            project_root=project_root,
+            vault_root=vault_root,
+            project_terms=project_terms,
+        ):
             continue
         try:
             transcript = normalize(str(rollout_path))
@@ -196,28 +279,40 @@ def _export_codex_chat_process(
         target_path.write_text(transcript, encoding="utf-8")
 
 
-def _rollout_matches_project(rollout_path: Path, project_root: Path) -> bool:
+def _rollout_matches_project(
+    rollout_path: Path,
+    project_root: Path,
+    vault_root: Path,
+    project_terms: list,
+) -> bool:
     project_norm = _normalized_path(project_root)
+    vault_norm = _normalized_path(vault_root)
+    session_within_vault = False
     try:
         with open(rollout_path, "r", encoding="utf-8", errors="replace") as f:
-            for _ in range(10):
-                line = f.readline()
-                if not line:
-                    break
+            for line in f:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if entry.get("type") != "session_meta":
-                    continue
                 payload = entry.get("payload", {})
                 if not isinstance(payload, dict):
-                    return False
+                    continue
+
                 session_cwd = payload.get("cwd")
-                if not session_cwd:
-                    return False
-                session_norm = _normalized_path(Path(session_cwd))
-                return session_norm == project_norm or session_norm.startswith(project_norm + os.sep)
+                if isinstance(session_cwd, str) and session_cwd.strip():
+                    session_norm = _normalized_path(Path(session_cwd))
+                    if _path_matches_root(session_norm, project_norm):
+                        return True
+                    if _path_matches_root(session_norm, vault_norm):
+                        session_within_vault = True
+
+                if session_within_vault and _payload_mentions_project(
+                    payload,
+                    project_root=project_root,
+                    project_terms=project_terms,
+                ):
+                    return True
     except OSError:
         return False
     return False
@@ -278,7 +373,8 @@ def _copy_opt_in_paths(
             shutil.copy2(source_path, target_path)
             continue
 
-        export_root = room_dir / _safe_name(source_path.name)
+        source_label = _safe_name(source_path.name)
+        export_root = room_dir if source_label == room_name else room_dir / source_label
         for nested_path in sorted(source_path.rglob("*")):
             if not nested_path.is_file():
                 continue
@@ -291,6 +387,157 @@ def _copy_opt_in_paths(
             target_path = export_root / nested_path.relative_to(source_path)
             _ensure_dir(target_path.parent)
             shutil.copy2(nested_path, target_path)
+
+
+def _merge_opt_in_paths(base_dir: Path, config_paths: list, cli_paths: list) -> list:
+    merged = []
+    seen = set()
+    for raw_path in list(config_paths or []) + list(cli_paths or []):
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (base_dir / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            merged.append(key)
+    return merged
+
+
+def _load_writing_export_config(project_root: Path, config_path: str = None):
+    candidate = None
+    if config_path:
+        candidate = Path(config_path).expanduser().resolve()
+    else:
+        for filename in DEFAULT_WRITING_CONFIG_FILENAMES:
+            auto_candidate = project_root / filename
+            if auto_candidate.exists():
+                candidate = auto_candidate.resolve()
+                break
+
+    if candidate is None:
+        return {}, None
+    if not candidate.exists():
+        raise FileNotFoundError(f"Writing sidecar config not found: {candidate}")
+
+    with open(candidate, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Writing sidecar config must be a mapping")
+    return data, candidate
+
+
+def resolve_vault_root(vault_dir: str, project_root: Path) -> Path:
+    """Infer the vault root even when the caller passes a direct project path."""
+    base_path = Path(vault_dir).expanduser().resolve()
+    if base_path == project_root:
+        return project_root.parent
+    return base_path
+
+
+def _project_slug(project: str) -> str:
+    return _safe_name(project.lower().replace(" ", "_").replace("-", "_"))
+
+
+def _project_wing(project: str) -> str:
+    return f"{_project_slug(project)}_writing_sidecar"
+
+
+def _build_project_terms(project: str, project_root: Path, extra_terms: list) -> list:
+    terms = {
+        project,
+        project_root.name,
+        project_root.name.replace("-", " "),
+        project_root.name.replace("_", " "),
+        project_root.name.replace("-", "_"),
+    }
+    for term in extra_terms or []:
+        if isinstance(term, str) and term.strip():
+            terms.add(term.strip())
+    return sorted(terms)
+
+
+def _mine_exported_sidecar(
+    output_root: Path,
+    project: str,
+    palace_path: Path,
+    refresh_palace: bool = False,
+):
+    from .miner import mine
+
+    output_root = output_root.resolve()
+    palace_path = palace_path.expanduser().resolve()
+
+    try:
+        palace_path.relative_to(output_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Palace path must be outside the exported sidecar directory")
+
+    if refresh_palace and palace_path.exists():
+        shutil.rmtree(palace_path)
+
+    _ensure_dir(palace_path)
+    mine(
+        project_dir=str(output_root),
+        palace_path=str(palace_path),
+        wing_override=_project_wing(project),
+        agent="writing_export",
+        limit=0,
+        dry_run=False,
+        respect_gitignore=True,
+        include_ignored=[],
+    )
+
+
+def _payload_mentions_project(payload: dict, project_root: Path, project_terms: list) -> bool:
+    project_norm = _normalized_path(project_root)
+    project_texts = {
+        project_norm,
+        project_norm.replace("\\", "/"),
+        *[_normalize_text(term) for term in project_terms],
+    }
+
+    for value in _iter_payload_strings(payload):
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        if project_norm in normalized or project_norm.replace("\\", "/") in normalized:
+            return True
+        if any(term and term in normalized for term in project_texts):
+            return True
+
+        candidate_paths = re.findall(r"[A-Za-z]:[\\/][^\"'\r\n]+", value)
+        for candidate in candidate_paths:
+            if _path_matches_root(_normalized_path(Path(candidate)), project_norm):
+                return True
+
+    return False
+
+
+def _iter_payload_strings(value) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_payload_strings(item)
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_payload_strings(nested)
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9:/\\._-]+", " ", value.lower()).strip()
+
+
+def _path_matches_root(candidate_norm: str, root_norm: str) -> bool:
+    return candidate_norm == root_norm or candidate_norm.startswith(root_norm + os.sep)
 
 
 def _should_skip_live_file(path: Path, project_root: Path) -> bool:
@@ -345,3 +592,20 @@ def _ensure_dir(path: Path):
 def _write_export_gitignore(output_root: Path):
     gitignore_path = output_root / ".gitignore"
     gitignore_path.write_text("entities.json\nmempalace.yaml\n", encoding="utf-8")
+
+
+def _write_sidecar_config(output_root: Path, project: str):
+    config_path = output_root / "mempalace.yaml"
+    config = {
+        "wing": _project_wing(project),
+        "rooms": [
+            {
+                "name": room,
+                "description": ROOM_DESCRIPTIONS[room],
+                "keywords": [room, room.replace("_", " ")],
+            }
+            for room in FIXED_ROOMS
+        ],
+    }
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)

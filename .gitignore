@@ -6,3 +6,10 @@ __pycache__/
 .pytest_cache/
 mempal.yaml
 .a5c/
+.tmp/
+.tmp-tests/
+test-artifacts-writing-export/
+manual-palace-e2e/
+manual-sidecar-e2e/
+.tmp_validate_public_rebase/
+pytest-cache-files-*/
