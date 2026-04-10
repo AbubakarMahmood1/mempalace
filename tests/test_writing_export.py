@@ -161,6 +161,8 @@ def test_export_writing_corpus_matches_vault_root_rollouts_and_config_paths():
                 [
                     "chat_project_terms:",
                     "  - Arthur sponsorship",
+                    "chat_exclude_terms:",
+                    "  - mempalace",
                     "audits:",
                     "  - ../../extras/audits",
                 ]
@@ -178,6 +180,12 @@ def test_export_writing_corpus_matches_vault_root_rollouts_and_config_paths():
             cwd=str(vault_root),
             user_text="Completely unrelated root-level task.",
             assistant_text="No project evidence here.",
+        )
+        build_codex_rollout(
+            codex_home / "sessions" / "2026" / "04" / "10" / "rollout-c.jsonl",
+            cwd=str(vault_root),
+            user_text="Arthur sponsorship in Witcher-DC needs a mempalace sidecar pass.",
+            assistant_text="This is a tooling discussion, not story process memory.",
         )
 
         summary = export_writing_corpus(

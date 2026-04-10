@@ -113,6 +113,7 @@ def export_writing_corpus(
         project_root,
         writing_config.get("chat_project_terms", []),
     )
+    excluded_chat_terms = _build_term_list(writing_config.get("chat_exclude_terms", []))
     brainstorm_inputs = _merge_opt_in_paths(
         config_base_dir,
         writing_config.get("brainstorms", []),
@@ -158,6 +159,7 @@ def export_writing_corpus(
         project_root=project_root,
         vault_root=vault_root,
         project_terms=project_terms,
+        excluded_chat_terms=excluded_chat_terms,
         output_root=output_root,
         summary=summary,
         dry_run=dry_run,
@@ -262,6 +264,7 @@ def _export_codex_chat_process(
     project_root: Path,
     vault_root: Path,
     project_terms: list,
+    excluded_chat_terms: list,
     output_root: Path,
     summary: dict,
     dry_run: bool,
@@ -277,6 +280,7 @@ def _export_codex_chat_process(
             project_root=project_root,
             vault_root=vault_root,
             project_terms=project_terms,
+            excluded_chat_terms=excluded_chat_terms,
         ):
             continue
         try:
@@ -302,10 +306,13 @@ def _rollout_matches_project(
     project_root: Path,
     vault_root: Path,
     project_terms: list,
+    excluded_chat_terms: list,
 ) -> bool:
     project_norm = _normalized_path(project_root)
     vault_norm = _normalized_path(vault_root)
     session_within_vault = False
+    mentions_project = False
+    mentions_excluded = False
     try:
         with open(rollout_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -325,15 +332,18 @@ def _rollout_matches_project(
                     if _path_matches_root(session_norm, vault_norm):
                         session_within_vault = True
 
-                if session_within_vault and _payload_mentions_project(
-                    payload,
-                    project_root=project_root,
-                    project_terms=project_terms,
-                ):
-                    return True
+                if session_within_vault:
+                    if _payload_mentions_project(
+                        payload,
+                        project_root=project_root,
+                        project_terms=project_terms,
+                    ):
+                        mentions_project = True
+                    if excluded_chat_terms and _payload_mentions_terms(payload, excluded_chat_terms):
+                        mentions_excluded = True
     except OSError:
         return False
-    return False
+    return session_within_vault and mentions_project and not mentions_excluded
 
 
 def _copy_tree_if_present(
@@ -478,6 +488,14 @@ def _build_project_terms(project: str, project_root: Path, extra_terms: list) ->
     return sorted(terms)
 
 
+def _build_term_list(extra_terms: list) -> list:
+    terms = set()
+    for term in extra_terms or []:
+        if isinstance(term, str) and term.strip():
+            terms.add(term.strip())
+    return sorted(terms)
+
+
 def _mine_exported_sidecar(
     output_root: Path,
     project: str,
@@ -547,6 +565,23 @@ def _payload_mentions_project(payload: dict, project_root: Path, project_terms: 
     return False
 
 
+def _payload_mentions_terms(payload: dict, terms: list) -> bool:
+    normalized_terms = [_normalize_text(term) for term in terms if isinstance(term, str) and term.strip()]
+    if not normalized_terms:
+        return False
+
+    for value in _iter_payload_strings(payload):
+        if _looks_like_path(value):
+            continue
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        if any(term and term in normalized for term in normalized_terms):
+            return True
+
+    return False
+
+
 def _iter_payload_strings(value) -> Iterable[str]:
     if isinstance(value, str):
         yield value
@@ -591,6 +626,10 @@ def _should_skip_live_file(path: Path, project_root: Path) -> bool:
 
 def _normalized_path(path: Path) -> str:
     return str(path.expanduser().resolve()).rstrip("\\/").lower()
+
+
+def _looks_like_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"))
 
 
 def _safe_name(name: str) -> str:

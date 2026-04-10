@@ -80,6 +80,10 @@ chat_project_terms:
   - Arthur sponsorship
   - Atlantis intake
 
+chat_exclude_terms:
+  - mempalace
+  - writing-sidecar
+
 brainstorms:
   - ../extras/brainstorms
 
@@ -104,6 +108,9 @@ Project evidence can come from:
 - the project name
 - project-relative path mentions
 - extra `chat_project_terms` from `writing-sidecar.yaml`
+
+Vault-root sessions can also be excluded with `chat_exclude_terms` when they are really
+tooling/admin conversations that only mention story phrases in passing.
 
 This is meant to catch real `writing-vault` root sessions without blindly attaching every
 vault-level chat to every project sidecar.
