@@ -13,19 +13,30 @@ import re
 import shutil
 import subprocess
 import tempfile
+import hashlib
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 import yaml
 
 from .normalize import normalize
+from .searcher import search_memories
 
 DEFAULT_CODEX_HOME = Path(os.path.expanduser("~/.codex"))
-DEFAULT_STAGING_ROOT = Path(os.path.expanduser("~/.mempalace/staging"))
-DEFAULT_PALACE_ROOT = Path(os.path.expanduser("~/.mempalace/palaces"))
 DEFAULT_WRITING_CONFIG_FILENAMES = ("writing-sidecar.yaml", "writing-sidecar.yml")
+DEFAULT_SIDECAR_OUTPUT_DIRNAME = ".sidecars"
+DEFAULT_SIDECAR_PALACE_DIRNAME = ".palaces"
 DEFAULT_RUNTIME_DIRNAME = ".mempalace-sidecar-runtime"
+STATE_FILENAME = ".writing-sidecar-state.json"
+STATE_VERSION = 1
+SEARCH_MODE_ROOMS = {
+    "planning": ("brainstorms", "discarded_paths", "audits", "chat_process"),
+    "audit": ("audits", "discarded_paths", "chat_process", "archived_notes"),
+    "history": ("chat_process", "audits", "brainstorms", "discarded_paths"),
+    "research": ("research", "archived_notes"),
+}
 FIXED_ROOMS = (
     "chat_process",
     "brainstorms",
@@ -66,14 +77,14 @@ def resolve_project_root(vault_dir: str, project: str) -> Path:
     )
 
 
-def default_output_dir(project: str) -> Path:
+def default_output_dir(vault_root: Path, project: str) -> Path:
     """Default staging directory for writing sidecars."""
-    return DEFAULT_STAGING_ROOT / _project_slug(project)
+    return vault_root / DEFAULT_SIDECAR_OUTPUT_DIRNAME / _project_slug(project)
 
 
-def default_palace_dir(project: str) -> Path:
+def default_palace_dir(vault_root: Path, project: str) -> Path:
     """Default palace directory for a writing sidecar."""
-    return DEFAULT_PALACE_ROOT / f"{_project_slug(project)}_writing_sidecar"
+    return vault_root / DEFAULT_SIDECAR_PALACE_DIRNAME / _project_slug(project)
 
 
 def default_runtime_dir(vault_root: Path, project: str) -> Path:
@@ -81,7 +92,7 @@ def default_runtime_dir(vault_root: Path, project: str) -> Path:
     return vault_root / DEFAULT_RUNTIME_DIRNAME / _project_slug(project)
 
 
-def export_writing_corpus(
+def _prepare_writing_context(
     vault_dir: str,
     project: str,
     out_dir: str = None,
@@ -90,17 +101,22 @@ def export_writing_corpus(
     brainstorm_paths=None,
     audit_paths=None,
     discarded_paths=None,
-    mine_after_export: bool = False,
     palace_path: str = None,
     runtime_root: str = None,
-    refresh_palace: bool = False,
-    dry_run: bool = False,
 ) -> dict:
-    """Export a curated writing-process corpus into fixed sidecar rooms."""
     project_root = resolve_project_root(vault_dir, project)
     vault_root = resolve_vault_root(vault_dir, project_root)
-    output_root = Path(out_dir).expanduser().resolve() if out_dir else default_output_dir(project)
+    output_root = (
+        Path(out_dir).expanduser().resolve()
+        if out_dir
+        else default_output_dir(vault_root, project).resolve()
+    )
     codex_root = Path(codex_home).expanduser().resolve() if codex_home else DEFAULT_CODEX_HOME
+    target_palace = (
+        Path(palace_path).expanduser().resolve()
+        if palace_path
+        else default_palace_dir(vault_root, project).resolve()
+    )
     sidecar_runtime_root = (
         Path(runtime_root).expanduser().resolve()
         if runtime_root
@@ -130,97 +146,174 @@ def export_writing_corpus(
         discarded_paths or [],
     )
 
-    summary = {
-        "project_root": str(project_root),
-        "vault_root": str(vault_root),
-        "output_root": str(output_root),
+    return {
+        "project": project,
+        "project_root": project_root,
+        "vault_root": vault_root,
+        "output_root": output_root,
+        "codex_root": codex_root,
+        "palace_path": target_palace,
+        "runtime_root": sidecar_runtime_root,
+        "writing_config": writing_config,
+        "loaded_config_path": loaded_config_path,
+        "generated_config_path": output_root / "mempalace.yaml",
+        "manifest_path": output_root / STATE_FILENAME,
+        "project_terms": project_terms,
+        "excluded_chat_terms": excluded_chat_terms,
+        "brainstorm_inputs": brainstorm_inputs,
+        "audit_inputs": audit_inputs,
+        "discarded_inputs": discarded_inputs,
+    }
+
+
+def _new_export_summary(context: dict) -> dict:
+    return {
+        "project_root": str(context["project_root"]),
+        "vault_root": str(context["vault_root"]),
+        "output_root": str(context["output_root"]),
         "rooms": {room: 0 for room in FIXED_ROOMS},
         "skipped_live_files": [],
         "skipped_missing_paths": [],
-        "loaded_config_path": str(loaded_config_path) if loaded_config_path else None,
-        "generated_config_path": str(output_root / "mempalace.yaml"),
-        "palace_path": None,
-        "runtime_root": str(sidecar_runtime_root),
+        "loaded_config_path": (
+            str(context["loaded_config_path"]) if context["loaded_config_path"] else None
+        ),
+        "generated_config_path": str(context["generated_config_path"]),
+        "manifest_path": str(context["manifest_path"]),
+        "palace_path": str(context["palace_path"]),
+        "runtime_root": str(context["runtime_root"]),
         "mine_skipped": None,
+        "last_synced_at": None,
+        "stale": None,
+        "stale_reasons": [],
     }
 
+
+def _collect_writing_entries(context: dict, summary: dict, dry_run: bool) -> list:
+    planned_entries = []
+
+    _export_codex_chat_process(
+        codex_root=context["codex_root"],
+        project_root=context["project_root"],
+        vault_root=context["vault_root"],
+        project_terms=context["project_terms"],
+        excluded_chat_terms=context["excluded_chat_terms"],
+        output_root=context["output_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+    _copy_tree_if_present(
+        source_dir=context["project_root"] / "_story_bible" / "research",
+        room_name="research",
+        source_kind="research",
+        output_root=context["output_root"],
+        project_root=context["project_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+    _copy_tree_if_present(
+        source_dir=context["project_root"] / "_story_bible" / "chapters",
+        room_name="archived_notes",
+        source_kind="archived_note",
+        output_root=context["output_root"],
+        project_root=context["project_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+    _copy_opt_in_paths(
+        raw_paths=context["brainstorm_inputs"],
+        room_name="brainstorms",
+        source_kind="brainstorm",
+        output_root=context["output_root"],
+        project_root=context["project_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+    _copy_opt_in_paths(
+        raw_paths=context["audit_inputs"],
+        room_name="audits",
+        source_kind="audit",
+        output_root=context["output_root"],
+        project_root=context["project_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+    _copy_opt_in_paths(
+        raw_paths=context["discarded_inputs"],
+        room_name="discarded_paths",
+        source_kind="discarded_path",
+        output_root=context["output_root"],
+        project_root=context["project_root"],
+        summary=summary,
+        dry_run=dry_run,
+        planned_entries=planned_entries,
+    )
+
+    return planned_entries
+
+
+def export_writing_corpus(
+    vault_dir: str,
+    project: str,
+    out_dir: str = None,
+    codex_home: str = None,
+    config_path: str = None,
+    brainstorm_paths=None,
+    audit_paths=None,
+    discarded_paths=None,
+    mine_after_export: bool = False,
+    palace_path: str = None,
+    runtime_root: str = None,
+    refresh_palace: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    """Export a curated writing-process corpus into fixed sidecar rooms."""
+    context = _prepare_writing_context(
+        vault_dir=vault_dir,
+        project=project,
+        out_dir=out_dir,
+        codex_home=codex_home,
+        config_path=config_path,
+        brainstorm_paths=brainstorm_paths,
+        audit_paths=audit_paths,
+        discarded_paths=discarded_paths,
+        palace_path=palace_path,
+        runtime_root=runtime_root,
+    )
+
+    summary = _new_export_summary(context)
+
     if not dry_run:
-        _ensure_dir(output_root)
-        _write_export_gitignore(output_root)
-        _write_sidecar_config(output_root, project)
+        _ensure_dir(context["output_root"])
+        _write_export_gitignore(context["output_root"])
+        _write_sidecar_config(context["output_root"], project)
         for room in FIXED_ROOMS:
-            room_dir = output_root / room
+            room_dir = context["output_root"] / room
             if room_dir.exists():
                 shutil.rmtree(room_dir)
             _ensure_dir(room_dir)
 
-    _export_codex_chat_process(
-        codex_root=codex_root,
-        project_root=project_root,
-        vault_root=vault_root,
-        project_terms=project_terms,
-        excluded_chat_terms=excluded_chat_terms,
-        output_root=output_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
-    _copy_tree_if_present(
-        source_dir=project_root / "_story_bible" / "research",
-        room_name="research",
-        output_root=output_root,
-        project_root=project_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
-    _copy_tree_if_present(
-        source_dir=project_root / "_story_bible" / "chapters",
-        room_name="archived_notes",
-        output_root=output_root,
-        project_root=project_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
+    planned_entries = _collect_writing_entries(context, summary, dry_run=dry_run)
 
-    _copy_opt_in_paths(
-        raw_paths=brainstorm_inputs,
-        room_name="brainstorms",
-        output_root=output_root,
-        project_root=project_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
-    _copy_opt_in_paths(
-        raw_paths=audit_inputs,
-        room_name="audits",
-        output_root=output_root,
-        project_root=project_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
-    _copy_opt_in_paths(
-        raw_paths=discarded_inputs,
-        room_name="discarded_paths",
-        output_root=output_root,
-        project_root=project_root,
-        summary=summary,
-        dry_run=dry_run,
-    )
+    if not dry_run:
+        _write_state_manifest(context, summary, planned_entries)
 
     if mine_after_export:
         if dry_run:
             summary["mine_skipped"] = "dry_run"
         else:
-            target_palace = (
-                Path(palace_path).expanduser().resolve() if palace_path else default_palace_dir(project)
-            )
             _mine_exported_sidecar(
-                output_root=output_root,
+                output_root=context["output_root"],
                 project=project,
-                palace_path=target_palace,
-                runtime_root=sidecar_runtime_root,
+                palace_path=context["palace_path"],
+                runtime_root=context["runtime_root"],
                 refresh_palace=refresh_palace,
             )
-            summary["palace_path"] = str(target_palace)
+            _write_state_manifest(context, summary, planned_entries)
 
     return summary
 
@@ -239,10 +332,14 @@ def print_export_summary(summary: dict, dry_run: bool = False):
         print(f"  Config:  {summary['loaded_config_path']}")
     elif summary.get("generated_config_path") and not dry_run:
         print(f"  Config:  {summary['generated_config_path']}")
+    if summary.get("manifest_path") and not dry_run:
+        print(f"  State:   {summary['manifest_path']}")
     if summary.get("palace_path"):
         print(f"  Palace:  {summary['palace_path']}")
     if summary.get("runtime_root") and (summary.get("palace_path") or summary.get("mine_skipped")):
         print(f"  Runtime: {summary['runtime_root']}")
+    if summary.get("last_synced_at") and not dry_run:
+        print(f"  Synced:  {summary['last_synced_at']}")
     if summary.get("mine_skipped") == "dry_run":
         print("  Mine:    skipped because --dry-run was used")
     print("\n  By room:")
@@ -259,6 +356,268 @@ def print_export_summary(summary: dict, dry_run: bool = False):
     print(f"\n{'=' * 55}\n")
 
 
+def get_writing_sidecar_status(
+    vault_dir: str,
+    project: str,
+    out_dir: str = None,
+    codex_home: str = None,
+    config_path: str = None,
+    brainstorm_paths=None,
+    audit_paths=None,
+    discarded_paths=None,
+    palace_path: str = None,
+    runtime_root: str = None,
+) -> dict:
+    """Inspect whether a writing sidecar is current or stale without mutating it."""
+    context = _prepare_writing_context(
+        vault_dir=vault_dir,
+        project=project,
+        out_dir=out_dir,
+        codex_home=codex_home,
+        config_path=config_path,
+        brainstorm_paths=brainstorm_paths,
+        audit_paths=audit_paths,
+        discarded_paths=discarded_paths,
+        palace_path=palace_path,
+        runtime_root=runtime_root,
+    )
+    summary = _new_export_summary(context)
+    current_entries = _collect_writing_entries(context, summary, dry_run=True)
+    manifest = _load_state_manifest(context["manifest_path"])
+    status = {
+        "project": project,
+        "project_root": str(context["project_root"]),
+        "vault_root": str(context["vault_root"]),
+        "output_root": str(context["output_root"]),
+        "config_path": str(context["loaded_config_path"]) if context["loaded_config_path"] else None,
+        "manifest_path": str(context["manifest_path"]),
+        "palace_path": str(context["palace_path"]),
+        "runtime_root": str(context["runtime_root"]),
+        "room_counts": manifest.get("room_counts", {}) if manifest else {},
+        "last_synced_at": manifest.get("synced_at") if manifest else None,
+        "built": manifest is not None,
+        "stale": True,
+        "stale_reasons": [],
+    }
+
+    if manifest is None:
+        status["stale_reasons"].append({"reason": "manifest_missing"})
+        if not context["palace_path"].exists():
+            status["stale_reasons"].append({"reason": "palace_missing"})
+        return status
+
+    if not context["palace_path"].exists():
+        status["stale_reasons"].append({"reason": "palace_missing"})
+
+    current_config = _describe_optional_file(context["loaded_config_path"])
+    manifest_config = manifest.get("config")
+    if current_config != manifest_config:
+        status["stale_reasons"].append({"reason": "config_changed"})
+
+    manifest_inputs = {entry["source_path"]: entry for entry in manifest.get("tracked_inputs", [])}
+    current_inputs = {entry["source_path"]: entry for entry in current_entries}
+
+    for source_path, tracked in manifest_inputs.items():
+        source = Path(source_path)
+        if not source.exists():
+            status["stale_reasons"].append({"reason": "input_missing", "source_path": source_path})
+            continue
+        current_signature = _describe_file(source)
+        tracked_signature = {
+            "size": tracked.get("size"),
+            "mtime": tracked.get("mtime"),
+            "sha256": tracked.get("sha256"),
+        }
+        if current_signature != tracked_signature:
+            status["stale_reasons"].append({"reason": "input_changed", "source_path": source_path})
+
+    for source_path in sorted(set(current_inputs) - set(manifest_inputs)):
+        status["stale_reasons"].append({"reason": "input_added", "source_path": source_path})
+
+    status["stale"] = bool(status["stale_reasons"])
+    return status
+
+
+def print_writing_status(status: dict):
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Writing Status")
+    print(f"{'=' * 55}")
+    print(f"  Project: {status['project_root']}")
+    print(f"  Vault:   {status['vault_root']}")
+    print(f"  Output:  {status['output_root']}")
+    print(f"  Palace:  {status['palace_path']}")
+    print(f"  Runtime: {status['runtime_root']}")
+    if status.get("config_path"):
+        print(f"  Config:  {status['config_path']}")
+    print(f"  State:   {status['manifest_path']}")
+    if status.get("last_synced_at"):
+        print(f"  Synced:  {status['last_synced_at']}")
+
+    if not status["built"]:
+        print("  Status:  NOT BUILT")
+    else:
+        print(f"  Status:  {'STALE' if status['stale'] else 'CLEAN'}")
+
+    if status.get("room_counts"):
+        print("\n  Room counts:")
+        for room, count in status["room_counts"].items():
+            print(f"    {room:20} {count}")
+
+    if status["stale_reasons"]:
+        print("\n  Reasons:")
+        for item in status["stale_reasons"]:
+            reason = item["reason"]
+            path = item.get("source_path")
+            if path:
+                print(f"    {reason:16} {path}")
+            else:
+                print(f"    {reason}")
+    print(f"\n{'=' * 55}\n")
+
+
+def search_writing_sidecar(query: str, palace_path: str, wing: str, mode: str, n_results: int = 5) -> dict:
+    if mode not in SEARCH_MODE_ROOMS:
+        raise ValueError(f"Unknown writing-search mode: {mode}")
+
+    merged = []
+    seen = set()
+    rooms = SEARCH_MODE_ROOMS[mode]
+    for room in rooms:
+        results = search_memories(
+            query=query,
+            palace_path=palace_path,
+            wing=wing,
+            room=room,
+            n_results=n_results,
+        )
+        if results.get("error"):
+            return results
+        for hit in results.get("results", []):
+            key = (hit.get("source_file"), hit.get("text"))
+            if key in seen:
+                continue
+            seen.add(key)
+            hit["mode"] = mode
+            merged.append(hit)
+            if len(merged) >= n_results:
+                return {
+                    "query": query,
+                    "wing": wing,
+                    "mode": mode,
+                    "room_order": list(rooms),
+                    "results": merged,
+                }
+
+    return {
+        "query": query,
+        "wing": wing,
+        "mode": mode,
+        "room_order": list(rooms),
+        "results": merged,
+    }
+
+
+def print_writing_search_results(search_data: dict):
+    query = search_data["query"]
+    mode = search_data["mode"]
+    wing = search_data["wing"]
+    hits = search_data.get("results", [])
+
+    if not hits:
+        print(f'\n  No writing-sidecar results found for: "{query}"')
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f'  Writing Sidecar Results for: "{query}"')
+    print(f"  Wing: {wing}")
+    print(f"  Mode: {mode}")
+    print(f"{'=' * 60}\n")
+
+    for i, hit in enumerate(hits, 1):
+        print(f"  [{i}] {hit.get('room', '?')}")
+        print(f"      Source: {hit.get('source_file', '?')}")
+        print(f"      Match:  {hit.get('similarity', '?')}")
+        print()
+        for line in hit.get("text", "").strip().split("\n"):
+            print(f"      {line}")
+        print()
+        print(f"  {'─' * 56}")
+    print()
+
+
+def scaffold_writing_sidecar(vault_dir: str, project: str, force: bool = False) -> dict:
+    project_root = resolve_project_root(vault_dir, project)
+    created_files = []
+    overwritten_files = []
+    skipped_files = []
+    created_dirs = []
+
+    directories = [
+        project_root / "logs",
+        project_root / "logs" / "audits",
+        project_root / "logs" / "brainstorms",
+        project_root / "logs" / "discarded_paths",
+        project_root / "logs" / "templates",
+    ]
+    for directory in directories:
+        if not directory.exists():
+            _ensure_dir(directory)
+            created_dirs.append(str(directory))
+        else:
+            _ensure_dir(directory)
+
+    files = {
+        project_root / "writing-sidecar.yaml": _default_writing_sidecar_config_text(),
+        project_root / "logs" / "README.md": _default_logs_readme_text(project_root.name),
+        project_root / "logs" / "templates" / "audit_snapshot.md": _default_audit_template_text(),
+        project_root / "logs" / "templates" / "chapter_handoff.md": _default_handoff_template_text(),
+        project_root / "logs" / "templates" / "discarded_path.md": _default_discarded_template_text(),
+    }
+
+    for path, content in files.items():
+        if path.exists() and not force:
+            skipped_files.append(str(path))
+            continue
+        if path.exists():
+            overwritten_files.append(str(path))
+        else:
+            created_files.append(str(path))
+        _ensure_dir(path.parent)
+        path.write_text(content, encoding="utf-8")
+
+    return {
+        "project_root": str(project_root),
+        "created_dirs": created_dirs,
+        "created_files": created_files,
+        "overwritten_files": overwritten_files,
+        "skipped_files": skipped_files,
+    }
+
+
+def print_scaffold_summary(summary: dict):
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Writing Init")
+    print(f"{'=' * 55}")
+    print(f"  Project: {summary['project_root']}")
+    if summary["created_dirs"]:
+        print("\n  Created directories:")
+        for path in summary["created_dirs"]:
+            print(f"    {path}")
+    if summary["created_files"]:
+        print("\n  Created files:")
+        for path in summary["created_files"]:
+            print(f"    {path}")
+    if summary["overwritten_files"]:
+        print("\n  Overwritten files:")
+        for path in summary["overwritten_files"]:
+            print(f"    {path}")
+    if summary["skipped_files"]:
+        print("\n  Left untouched:")
+        for path in summary["skipped_files"]:
+            print(f"    {path}")
+    print(f"\n{'=' * 55}\n")
+
+
 def _export_codex_chat_process(
     codex_root: Path,
     project_root: Path,
@@ -268,6 +627,7 @@ def _export_codex_chat_process(
     output_root: Path,
     summary: dict,
     dry_run: bool,
+    planned_entries: list,
 ):
     sessions_root = codex_root / "sessions"
     if not sessions_root.exists():
@@ -291,12 +651,20 @@ def _export_codex_chat_process(
             continue
 
         summary["rooms"]["chat_process"] += 1
-        if dry_run:
-            continue
-
         relative = rollout_path.relative_to(sessions_root).with_suffix(".txt")
         filename = _safe_name("__".join(relative.parts))
         target_path = room_dir / filename
+        planned_entries.append(
+            {
+                "room": "chat_process",
+                "source_path": str(rollout_path.resolve()),
+                "exported_path": str(target_path.resolve()),
+                "source_kind": "codex_rollout",
+            }
+        )
+        if dry_run:
+            continue
+
         _ensure_dir(target_path.parent)
         target_path.write_text(transcript, encoding="utf-8")
 
@@ -349,10 +717,12 @@ def _rollout_matches_project(
 def _copy_tree_if_present(
     source_dir: Path,
     room_name: str,
+    source_kind: str,
     output_root: Path,
     project_root: Path,
     summary: dict,
     dry_run: bool,
+    planned_entries: list,
 ):
     if not source_dir.exists():
         return
@@ -366,10 +736,18 @@ def _copy_tree_if_present(
             continue
 
         summary["rooms"][room_name] += 1
+        target_path = room_dir / source_path.relative_to(source_dir)
+        planned_entries.append(
+            {
+                "room": room_name,
+                "source_path": str(source_path.resolve()),
+                "exported_path": str(target_path.resolve()),
+                "source_kind": source_kind,
+            }
+        )
         if dry_run:
             continue
 
-        target_path = room_dir / source_path.relative_to(source_dir)
         _ensure_dir(target_path.parent)
         shutil.copy2(source_path, target_path)
 
@@ -377,10 +755,12 @@ def _copy_tree_if_present(
 def _copy_opt_in_paths(
     raw_paths: list,
     room_name: str,
+    source_kind: str,
     output_root: Path,
     project_root: Path,
     summary: dict,
     dry_run: bool,
+    planned_entries: list,
 ):
     room_dir = output_root / room_name
     for raw_path in raw_paths:
@@ -394,9 +774,17 @@ def _copy_opt_in_paths(
                 summary["skipped_live_files"].append(str(source_path))
                 continue
             summary["rooms"][room_name] += 1
+            target_path = room_dir / _safe_name(source_path.name)
+            planned_entries.append(
+                {
+                    "room": room_name,
+                    "source_path": str(source_path.resolve()),
+                    "exported_path": str(target_path.resolve()),
+                    "source_kind": source_kind,
+                }
+            )
             if dry_run:
                 continue
-            target_path = room_dir / _safe_name(source_path.name)
             _ensure_dir(target_path.parent)
             shutil.copy2(source_path, target_path)
             continue
@@ -410,9 +798,17 @@ def _copy_opt_in_paths(
                 summary["skipped_live_files"].append(str(nested_path))
                 continue
             summary["rooms"][room_name] += 1
+            target_path = export_root / nested_path.relative_to(source_path)
+            planned_entries.append(
+                {
+                    "room": room_name,
+                    "source_path": str(nested_path.resolve()),
+                    "exported_path": str(target_path.resolve()),
+                    "source_kind": source_kind,
+                }
+            )
             if dry_run:
                 continue
-            target_path = export_root / nested_path.relative_to(source_path)
             _ensure_dir(target_path.parent)
             shutil.copy2(nested_path, target_path)
 
@@ -494,6 +890,85 @@ def _build_term_list(extra_terms: list) -> list:
         if isinstance(term, str) and term.strip():
             terms.add(term.strip())
     return sorted(terms)
+
+
+def _write_state_manifest(context: dict, summary: dict, planned_entries: list):
+    synced_at = _utcnow_iso()
+    tracked_inputs = []
+    for entry in sorted(
+        planned_entries,
+        key=lambda item: (item["room"], item["source_kind"], item["source_path"], item["exported_path"]),
+    ):
+        source_path = Path(entry["source_path"])
+        tracked = dict(entry)
+        tracked.update(_describe_file(source_path))
+        tracked_inputs.append(tracked)
+
+    manifest = {
+        "version": STATE_VERSION,
+        "project": context["project"],
+        "project_root": str(context["project_root"]),
+        "vault_root": str(context["vault_root"]),
+        "output_root": str(context["output_root"]),
+        "palace_path": str(context["palace_path"]),
+        "runtime_root": str(context["runtime_root"]),
+        "config": _describe_optional_file(context["loaded_config_path"]),
+        "synced_at": synced_at,
+        "room_counts": dict(summary["rooms"]),
+        "tracked_inputs": tracked_inputs,
+    }
+
+    context["manifest_path"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    summary["last_synced_at"] = synced_at
+
+
+def _load_state_manifest(manifest_path: Path):
+    manifest_path = manifest_path.expanduser().resolve()
+    if not manifest_path.exists():
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _describe_file(path: Path) -> dict:
+    path = path.expanduser().resolve()
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "sha256": _sha256_file(path),
+    }
+
+
+def _describe_optional_file(path: Path | None):
+    if not path:
+        return None
+    path = Path(path).expanduser().resolve()
+    if not path.exists():
+        return {
+            "path": str(path),
+            "size": None,
+            "mtime": None,
+            "sha256": None,
+        }
+    described = _describe_file(path)
+    described["path"] = str(path)
+    return described
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _mine_exported_sidecar(
@@ -636,6 +1111,172 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "export"
 
 
+def _default_writing_sidecar_config_text() -> str:
+    return """chat_project_terms:
+  # Add project-specific phrases that often appear in vault-root chats.
+  # - Arthur sponsorship
+
+chat_exclude_terms:
+  # Add tooling/admin phrases that should never attach a chat to the project.
+  # - mempalace
+
+brainstorms: []
+audits: []
+discarded_paths: []
+"""
+
+
+def _default_logs_readme_text(project_name: str) -> str:
+    return f"""# Logs
+
+This folder stores sidecar-safe process memory for `{project_name}`.
+
+Use it for:
+- archived audits
+- brainstorm bundles
+- discarded scene paths or rejected structural options
+- chapter handoff notes that should stay searchable
+
+Workflow:
+- use `logs/templates/` when creating new sidecar artifacts
+- update these files during chapter closeout and handoff, not in live canon docs
+- run `mempalace writing-sync <vault> --project {project_name}` after meaningful log changes
+
+Do not use it for:
+- source-of-truth canon
+- current chapter scratch work
+- the live story bible
+
+Recommended vault `.gitignore` entries:
+- `.mempalace-sidecar-runtime/`
+- `.palaces/`
+- `.sidecars/`
+"""
+
+
+def _default_audit_template_text() -> str:
+    return """# Chapter Closeout Audit
+
+Project:
+Chapter:
+Title:
+Date:
+
+## Final Result
+
+- Final cold-audit score:
+- Result:
+- Status:
+- Next practical step:
+
+## Audit Progression
+
+| Score | Result | Dominant problem |
+|------:|--------|------------------|
+
+## Main Problems That Had To Be Fixed
+
+1.
+2.
+3.
+
+## What The Final Version Does Better
+
+- 
+- 
+- 
+
+## Carry-Forward Threads Logged At Closeout
+
+- 
+- 
+- 
+
+## Residual Non-Blocking Issues
+
+- 
+- 
+
+## Sources Used
+
+- 
+"""
+
+
+def _default_handoff_template_text() -> str:
+    return """# Chapter Handoff
+
+Project:
+Date:
+Next Chapter:
+
+## Starting Position
+
+- 
+
+## Core Opening Pressures
+
+1.
+2.
+3.
+
+## Useful Scene Questions
+
+- 
+- 
+- 
+
+## Guardrails
+
+- 
+- 
+- 
+
+## Best Immediate Scene Material
+
+- 
+- 
+- 
+
+## Sources Used
+
+- 
+"""
+
+
+def _default_discarded_template_text() -> str:
+    return """# Discarded Path
+
+Project:
+Chapter:
+Date:
+
+## Rejected Version
+
+- 
+
+## Why It Was Rejected
+
+- 
+- 
+
+## Keep Instead
+
+- 
+- 
+
+## Retrieval Terms Worth Keeping
+
+- 
+- 
+- 
+
+## Sources Used
+
+- 
+"""
+
+
 def _ensure_dir(path: Path):
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -658,7 +1299,10 @@ def _ensure_dir(path: Path):
 
 def _write_export_gitignore(output_root: Path):
     gitignore_path = output_root / ".gitignore"
-    gitignore_path.write_text("entities.json\nmempalace.yaml\n", encoding="utf-8")
+    gitignore_path.write_text(
+        f"entities.json\nmempalace.yaml\n{STATE_FILENAME}\n",
+        encoding="utf-8",
+    )
 
 
 def _write_sidecar_config(output_root: Path, project: str):

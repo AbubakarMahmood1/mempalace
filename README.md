@@ -107,8 +107,8 @@ mempalace status
 Three mining modes: **projects** (code and docs), **convos** (conversation exports), and **general** (auto-classifies into decisions, preferences, milestones, problems, and emotional context). Everything stays on your machine.
 
 Private branch note: see [`WRITING_SIDECAR.md`](WRITING_SIDECAR.md) for the
-writing-vault `writing-export` / `writing-sync` sidecar workflow on
-`private/writing-cdlc-sidecar`.
+writing-vault `writing-init` / `writing-status` / `writing-search` / `writing-sync`
+workflow on `private/writing-cdlc-sidecar`.
 
 ---
 

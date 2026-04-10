@@ -13,7 +13,10 @@ Commands:
     mempalace split <dir>                 Split concatenated mega-files into per-session files
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
+    mempalace writing-init <dir>          Scaffold sidecar files for a writing project
     mempalace writing-export <dir>        Build a writing-process sidecar corpus
+    mempalace writing-status <dir>        Show whether a writing sidecar is current or stale
+    mempalace writing-search <dir>        Query a writing sidecar by intent
     mempalace writing-export <dir> --mine Export and mine into a dedicated sidecar palace
     mempalace writing-sync <dir>          Export, mine, and optionally search a writing sidecar
     mempalace search "query"              Find anything, exact words
@@ -26,7 +29,10 @@ Examples:
     mempalace init ~/projects/my_app
     mempalace mine ~/projects/my_app
     mempalace mine ~/chats/claude-sessions --mode convos
+    mempalace writing-init ~/writing-vault --project Witcher-DC
     mempalace writing-export ~/writing-vault --project Witcher-DC
+    mempalace writing-status ~/writing-vault --project Witcher-DC
+    mempalace writing-search ~/writing-vault --project Witcher-DC --query "Arthur sponsorship"
     mempalace writing-export ~/writing-vault --project Witcher-DC --mine
     mempalace writing-sync ~/writing-vault --project Witcher-DC --query "Arthur sponsorship"
     mempalace search "why did we switch to GraphQL"
@@ -184,18 +190,10 @@ def cmd_writing_export(args):
     print_export_summary(summary, dry_run=args.dry_run)
 
 
-def cmd_writing_sync(args):
-    from .searcher import SearchError, search
-    from .writing_export import (
-        _project_wing,
-        _sidecar_runtime_environment,
-        default_palace_dir,
-        export_writing_corpus,
-        print_export_summary,
-    )
+def cmd_writing_status(args):
+    from .writing_export import get_writing_sidecar_status, print_writing_status
 
-    palace_path = args.sidecar_palace or str(default_palace_dir(args.project))
-    summary = export_writing_corpus(
+    status = get_writing_sidecar_status(
         vault_dir=args.dir,
         project=args.project,
         out_dir=args.out,
@@ -204,28 +202,207 @@ def cmd_writing_sync(args):
         brainstorm_paths=args.brainstorms,
         audit_paths=args.audits,
         discarded_paths=args.discarded_paths,
-        mine_after_export=True,
-        palace_path=palace_path,
+        palace_path=args.sidecar_palace,
         runtime_root=args.runtime_root,
-        refresh_palace=args.refresh_palace,
-        dry_run=False,
     )
-    print_export_summary(summary, dry_run=False)
+    print_writing_status(status)
+
+
+def cmd_writing_search(args):
+    from .writing_export import (
+        _project_wing,
+        _sidecar_runtime_environment,
+        export_writing_corpus,
+        get_writing_sidecar_status,
+        print_export_summary,
+        print_writing_search_results,
+        print_writing_status,
+        search_writing_sidecar,
+    )
+
+    status = get_writing_sidecar_status(
+        vault_dir=args.dir,
+        project=args.project,
+        out_dir=args.out,
+        codex_home=args.codex_home,
+        config_path=args.config,
+        brainstorm_paths=args.brainstorms,
+        audit_paths=args.audits,
+        discarded_paths=args.discarded_paths,
+        palace_path=args.sidecar_palace,
+        runtime_root=args.runtime_root,
+    )
+
+    should_sync = args.sync == "always" or (args.sync == "if-needed" and status["stale"])
+    if should_sync:
+        summary = export_writing_corpus(
+            vault_dir=args.dir,
+            project=args.project,
+            out_dir=args.out,
+            codex_home=args.codex_home,
+            config_path=args.config,
+            brainstorm_paths=args.brainstorms,
+            audit_paths=args.audits,
+            discarded_paths=args.discarded_paths,
+            mine_after_export=True,
+            palace_path=args.sidecar_palace,
+            runtime_root=args.runtime_root,
+            refresh_palace=args.refresh_palace,
+            dry_run=False,
+        )
+        print_export_summary(summary, dry_run=False)
+        status = get_writing_sidecar_status(
+            vault_dir=args.dir,
+            project=args.project,
+            out_dir=args.out,
+            codex_home=args.codex_home,
+            config_path=args.config,
+            brainstorm_paths=args.brainstorms,
+            audit_paths=args.audits,
+            discarded_paths=args.discarded_paths,
+            palace_path=args.sidecar_palace,
+            runtime_root=args.runtime_root,
+        )
+    else:
+        if args.sync == "never" and status["stale"]:
+            print("  Warning: sidecar is stale; searching existing palace because --sync never was used.\n")
+        else:
+            print_writing_status(status)
+
+    palace_path = Path(status["palace_path"])
+    if not palace_path.exists():
+        print(f"\n  No palace found at {palace_path}")
+        print("  Run writing-sync or use --sync always/if-needed to build it first.")
+        sys.exit(1)
+
+    with _sidecar_runtime_environment(Path(status["runtime_root"])):
+        results = search_writing_sidecar(
+            query=args.query,
+            palace_path=str(palace_path),
+            wing=_project_wing(args.project),
+            mode=args.mode,
+            n_results=args.results,
+        )
+
+    if results.get("error"):
+        print(f"\n  Search error: {results['error']}")
+        sys.exit(1)
+    print_writing_search_results(results)
+
+
+def cmd_writing_init(args):
+    from .writing_export import print_scaffold_summary, scaffold_writing_sidecar
+
+    summary = scaffold_writing_sidecar(
+        vault_dir=args.dir,
+        project=args.project,
+        force=args.force,
+    )
+    print_scaffold_summary(summary)
+
+
+def cmd_writing_sync(args):
+    from .writing_export import (
+        _project_wing,
+        _sidecar_runtime_environment,
+        export_writing_corpus,
+        get_writing_sidecar_status,
+        print_export_summary,
+        print_writing_search_results,
+        print_writing_status,
+        search_writing_sidecar,
+    )
+
+    status = get_writing_sidecar_status(
+        vault_dir=args.dir,
+        project=args.project,
+        out_dir=args.out,
+        codex_home=args.codex_home,
+        config_path=args.config,
+        brainstorm_paths=args.brainstorms,
+        audit_paths=args.audits,
+        discarded_paths=args.discarded_paths,
+        palace_path=args.sidecar_palace,
+        runtime_root=args.runtime_root,
+    )
+
+    should_sync = (
+        args.refresh_palace
+        or args.sync == "always"
+        or (args.sync == "if-needed" and status["stale"])
+    )
+    if should_sync:
+        summary = export_writing_corpus(
+            vault_dir=args.dir,
+            project=args.project,
+            out_dir=args.out,
+            codex_home=args.codex_home,
+            config_path=args.config,
+            brainstorm_paths=args.brainstorms,
+            audit_paths=args.audits,
+            discarded_paths=args.discarded_paths,
+            mine_after_export=True,
+            palace_path=args.sidecar_palace,
+            runtime_root=args.runtime_root,
+            refresh_palace=args.refresh_palace,
+            dry_run=False,
+        )
+        print_export_summary(summary, dry_run=False)
+        status = get_writing_sidecar_status(
+            vault_dir=args.dir,
+            project=args.project,
+            out_dir=args.out,
+            codex_home=args.codex_home,
+            config_path=args.config,
+            brainstorm_paths=args.brainstorms,
+            audit_paths=args.audits,
+            discarded_paths=args.discarded_paths,
+            palace_path=args.sidecar_palace,
+            runtime_root=args.runtime_root,
+        )
+    else:
+        if args.sync == "never" and status["stale"]:
+            print("  Warning: sidecar is stale; skipping rebuild because --sync never was used.\n")
+        else:
+            print("  Sidecar is current; skipping rebuild.\n")
+        print_writing_status(status)
 
     if not args.query:
         return
 
-    try:
-        with _sidecar_runtime_environment(Path(summary["runtime_root"])):
+    palace_path = Path(status["palace_path"])
+    if not palace_path.exists():
+        print(f"\n  No palace found at {palace_path}")
+        print("  Run writing-sync without --sync never, or use --sync always.")
+        sys.exit(1)
+
+    with _sidecar_runtime_environment(Path(status["runtime_root"])):
+        if args.mode:
+            results = search_writing_sidecar(
+                query=args.query,
+                palace_path=str(palace_path),
+                wing=_project_wing(args.project),
+                mode=args.mode,
+                n_results=args.results,
+            )
+            if results.get("error"):
+                print(f"\n  Search error: {results['error']}")
+                sys.exit(1)
+            print_writing_search_results(results)
+            return
+
+        from .searcher import SearchError, search
+
+        try:
             search(
                 query=args.query,
-                palace_path=summary["palace_path"] or palace_path,
+                palace_path=str(palace_path),
                 wing=_project_wing(args.project),
                 room=args.room,
                 n_results=args.results,
             )
-    except SearchError:
-        sys.exit(1)
+        except SearchError:
+            sys.exit(1)
 
 
 def cmd_repair(args):
@@ -535,7 +712,7 @@ def main():
     p_writing_export.add_argument(
         "--out",
         default=None,
-        help="Output directory (default: ~/.mempalace/staging/<project>)",
+        help="Output directory (default: <vault>/.sidecars/<project>)",
     )
     p_writing_export.add_argument(
         "--codex-home",
@@ -573,7 +750,7 @@ def main():
     p_writing_export.add_argument(
         "--sidecar-palace",
         default=None,
-        help="Palace directory for --mine (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
+        help="Palace directory for --mine (default: <vault>/.palaces/<project>)",
     )
     p_writing_export.add_argument(
         "--runtime-root",
@@ -605,7 +782,7 @@ def main():
     p_writing_sync.add_argument(
         "--out",
         default=None,
-        help="Output directory (default: ~/.mempalace/staging/<project>)",
+        help="Output directory (default: <vault>/.sidecars/<project>)",
     )
     p_writing_sync.add_argument(
         "--codex-home",
@@ -638,7 +815,7 @@ def main():
     p_writing_sync.add_argument(
         "--sidecar-palace",
         default=None,
-        help="Palace directory for the synced sidecar (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
+        help="Palace directory for the synced sidecar (default: <vault>/.palaces/<project>)",
     )
     p_writing_sync.add_argument(
         "--runtime-root",
@@ -651,9 +828,21 @@ def main():
         help="Rebuild the target palace directory before mining",
     )
     p_writing_sync.add_argument(
+        "--sync",
+        choices=["always", "if-needed", "never"],
+        default="if-needed",
+        help="When to rebuild the sidecar before any optional search (default: if-needed)",
+    )
+    p_writing_sync.add_argument(
         "--query",
         default=None,
         help="Optional search query to run after the sync finishes",
+    )
+    p_writing_sync.add_argument(
+        "--mode",
+        choices=["planning", "audit", "history", "research"],
+        default=None,
+        help="Intent-aware sidecar search mode for the optional post-sync query",
     )
     p_writing_sync.add_argument(
         "--room",
@@ -665,6 +854,161 @@ def main():
         type=int,
         default=5,
         help="Number of post-sync search results to show",
+    )
+
+    # writing-status
+    p_writing_status = sub.add_parser(
+        "writing-status",
+        help="Show whether a writing sidecar is current, stale, or not built yet",
+    )
+    p_writing_status.add_argument("dir", help="Vault root or project directory")
+    p_writing_status.add_argument(
+        "--project",
+        required=True,
+        help="Project name to inspect (for example: Witcher-DC)",
+    )
+    p_writing_status.add_argument(
+        "--out",
+        default=None,
+        help="Output directory (default: <vault>/.sidecars/<project>)",
+    )
+    p_writing_status.add_argument(
+        "--codex-home",
+        default=None,
+        help="Codex home directory to scan for rollout JSONL (default: ~/.codex)",
+    )
+    p_writing_status.add_argument(
+        "--config",
+        default=None,
+        help="Optional writing-sidecar YAML config with extra paths and chat match terms",
+    )
+    p_writing_status.add_argument(
+        "--brainstorms",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the brainstorms room; repeat as needed",
+    )
+    p_writing_status.add_argument(
+        "--audits",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the audits room; repeat as needed",
+    )
+    p_writing_status.add_argument(
+        "--discarded-paths",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the discarded_paths room; repeat as needed",
+    )
+    p_writing_status.add_argument(
+        "--sidecar-palace",
+        default=None,
+        help="Palace directory for the sidecar (default: <vault>/.palaces/<project>)",
+    )
+    p_writing_status.add_argument(
+        "--runtime-root",
+        default=None,
+        help="Runtime/cache directory for sidecar mining and search (default: <vault>/.mempalace-sidecar-runtime/<project>)",
+    )
+
+    # writing-search
+    p_writing_search = sub.add_parser(
+        "writing-search",
+        help="Search a writing sidecar with planning/audit/history/research intent modes",
+    )
+    p_writing_search.add_argument("dir", help="Vault root or project directory")
+    p_writing_search.add_argument(
+        "--project",
+        required=True,
+        help="Project name to search (for example: Witcher-DC)",
+    )
+    p_writing_search.add_argument(
+        "--query",
+        required=True,
+        help="Search query to run against the writing sidecar",
+    )
+    p_writing_search.add_argument(
+        "--mode",
+        choices=["planning", "audit", "history", "research"],
+        default="planning",
+        help="Intent mode used to prioritize sidecar rooms (default: planning)",
+    )
+    p_writing_search.add_argument(
+        "--sync",
+        choices=["always", "if-needed", "never"],
+        default="if-needed",
+        help="When to rebuild the sidecar before search (default: if-needed)",
+    )
+    p_writing_search.add_argument(
+        "--out",
+        default=None,
+        help="Output directory (default: <vault>/.sidecars/<project>)",
+    )
+    p_writing_search.add_argument(
+        "--codex-home",
+        default=None,
+        help="Codex home directory to scan for rollout JSONL (default: ~/.codex)",
+    )
+    p_writing_search.add_argument(
+        "--config",
+        default=None,
+        help="Optional writing-sidecar YAML config with extra paths and chat match terms",
+    )
+    p_writing_search.add_argument(
+        "--brainstorms",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the brainstorms room; repeat as needed",
+    )
+    p_writing_search.add_argument(
+        "--audits",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the audits room; repeat as needed",
+    )
+    p_writing_search.add_argument(
+        "--discarded-paths",
+        action="append",
+        default=[],
+        help="Opt-in file or directory to export into the discarded_paths room; repeat as needed",
+    )
+    p_writing_search.add_argument(
+        "--sidecar-palace",
+        default=None,
+        help="Palace directory for the sidecar (default: <vault>/.palaces/<project>)",
+    )
+    p_writing_search.add_argument(
+        "--runtime-root",
+        default=None,
+        help="Runtime/cache directory for sidecar mining and search (default: <vault>/.mempalace-sidecar-runtime/<project>)",
+    )
+    p_writing_search.add_argument(
+        "--refresh-palace",
+        action="store_true",
+        help="If a rebuild happens, recreate the target palace from scratch first",
+    )
+    p_writing_search.add_argument(
+        "--results",
+        type=int,
+        default=5,
+        help="Number of search results to show",
+    )
+
+    # writing-init
+    p_writing_init = sub.add_parser(
+        "writing-init",
+        help="Scaffold writing-sidecar files and templates for a project",
+    )
+    p_writing_init.add_argument("dir", help="Vault root or project directory")
+    p_writing_init.add_argument(
+        "--project",
+        required=True,
+        help="Project name to scaffold (for example: Witcher-DC)",
+    )
+    p_writing_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing scaffold files",
     )
 
     # compress
@@ -779,7 +1123,10 @@ def main():
         "split": cmd_split,
         "search": cmd_search,
         "mcp": cmd_mcp,
+        "writing-init": cmd_writing_init,
         "writing-export": cmd_writing_export,
+        "writing-status": cmd_writing_status,
+        "writing-search": cmd_writing_search,
         "writing-sync": cmd_writing_sync,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,

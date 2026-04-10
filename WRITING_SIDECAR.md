@@ -1,11 +1,11 @@
 # Writing Sidecar Workflow
 
-This branch adds a private workflow for turning curated writing-process material into a
-derived MemPalace corpus without mining the live `writing-vault` project directly.
+This branch adds a private writing-sidecar layer for CDLC projects. The sidecar is
+process memory only. It stays separate from the live story bible and active chapter files.
 
 ## What It Does
 
-`mempalace writing-export` builds a staging corpus with fixed rooms:
+The sidecar exporter builds a derived corpus with fixed rooms:
 
 - `chat_process`
 - `brainstorms`
@@ -14,15 +14,46 @@ derived MemPalace corpus without mining the live `writing-vault` project directl
 - `research`
 - `archived_notes`
 
-The exporter:
+The sidecar flow:
 
-- copies archived and research material into a separate sidecar directory
+- exports only sidecar-safe material into a derived corpus
 - skips live source-of-truth files like `AGENTS.md`, current notes, and active `Chapter *.txt`
 - normalizes matching Codex rollout JSONL into `chat_process`
-- writes a sidecar `mempalace.yaml` so the exported corpus is mineable immediately
+- writes a sidecar `mempalace.yaml` and `.writing-sidecar-state.json`
+- tracks staleness from config changes, input changes, missing inputs, and newly eligible inputs
 - uses a vault-local runtime cache for Chroma and the ONNX embedder during mine/search
 
-## Basic Usage
+## Default Paths
+
+By default, a project sidecar lives under the vault:
+
+```text
+<vault>\.sidecars\<project_slug>\
+<vault>\.palaces\<project_slug>\
+<vault>\.mempalace-sidecar-runtime\<project_slug>\
+```
+
+For `Witcher-DC`, that means:
+
+```text
+<vault>\.sidecars\witcher_dc\
+<vault>\.palaces\witcher_dc\
+<vault>\.mempalace-sidecar-runtime\witcher_dc\
+```
+
+## Commands
+
+Scaffold the sidecar layer for a project:
+
+```powershell
+mempalace writing-init C:\Users\theab\Documents\writing-vault --project Witcher-DC
+```
+
+Check whether the sidecar is clean or stale:
+
+```powershell
+mempalace writing-status C:\Users\theab\Documents\writing-vault --project Witcher-DC
+```
 
 Export only:
 
@@ -30,45 +61,78 @@ Export only:
 mempalace writing-export C:\Users\theab\Documents\writing-vault --project Witcher-DC
 ```
 
-Export and mine into a dedicated sidecar palace:
+Export and mine:
 
 ```powershell
 mempalace writing-export C:\Users\theab\Documents\writing-vault --project Witcher-DC --mine
 ```
 
-One-shot sync, mine, and search:
+Search with planning intent:
+
+```powershell
+mempalace writing-search C:\Users\theab\Documents\writing-vault `
+  --project Witcher-DC `
+  --query "physician testing sphere"
+```
+
+One-shot sync and search:
 
 ```powershell
 mempalace writing-sync C:\Users\theab\Documents\writing-vault `
   --project Witcher-DC `
   --query "Arthur sponsorship" `
-  --room chat_process
+  --mode history
 ```
 
-By default, mining and search runtime files go under:
+## Sync Policy
+
+`writing-sync` and `writing-search` both support:
+
+- `--sync if-needed` — default; rebuild only when stale
+- `--sync always` — force export + mine before search
+- `--sync never` — do not rebuild; search the existing palace and warn if stale
+
+`--refresh-palace` still forces a full palace rebuild when a sync happens.
+
+## Intent Modes
+
+`writing-search` uses fixed room priority by mode:
+
+- `planning`: `brainstorms`, `discarded_paths`, `audits`, `chat_process`
+- `audit`: `audits`, `discarded_paths`, `chat_process`, `archived_notes`
+- `history`: `chat_process`, `audits`, `brainstorms`, `discarded_paths`
+- `research`: `research`, `archived_notes`
+
+Results are merged by room priority first, then whatever each room search returns. The
+sidecar is evidence, not canon. If a sidecar hit conflicts with live story-bible docs,
+the live docs win.
+
+## State File
+
+Every successful export writes:
 
 ```text
-<vault>\.mempalace-sidecar-runtime\<project_slug>\
+<sidecar output>\.writing-sidecar-state.json
 ```
 
-Export, mine, and rebuild the target palace from scratch:
+It records:
 
-```powershell
-mempalace writing-export C:\Users\theab\Documents\writing-vault --project Witcher-DC --mine --refresh-palace
-```
+- project, vault, output, palace, and runtime paths
+- config fingerprint
+- last sync timestamp
+- room counts
+- tracked inputs with size, mtime, and SHA-256
 
-Use explicit output and palace paths:
+`writing-status` compares the current eligible inputs to that manifest and reports:
 
-```powershell
-mempalace writing-export C:\Users\theab\Documents\writing-vault `
-  --project Witcher-DC `
-  --out C:\Users\theab\Documents\writing-vault\.sidecars\witcher-dc `
-  --mine `
-  --runtime-root C:\Users\theab\Documents\writing-vault\.mempalace-sidecar-runtime\witcher-dc `
-  --sidecar-palace C:\Users\theab\Documents\writing-vault\.palaces\witcher-dc
-```
+- `manifest_missing`
+- `palace_missing`
+- `config_changed`
+- `input_changed`
+- `input_missing`
+- `input_added`
 
-## Optional Config
+## Config
 
 If `writing-sidecar.yaml` exists in the project root, it is loaded automatically.
 You can also pass it explicitly with `--config`.
@@ -77,21 +141,21 @@ Example:
 
 ```yaml
 chat_project_terms:
+  - League of Demons
   - Arthur sponsorship
-  - Atlantis intake
 
 chat_exclude_terms:
   - mempalace
   - writing-sidecar
 
 brainstorms:
-  - ../extras/brainstorms
+  - logs/brainstorms
 
 audits:
-  - ../extras/audits
+  - logs/audits
 
 discarded_paths:
-  - ../extras/discarded
+  - logs/discarded_paths
 ```
 
 Relative paths are resolved from the config file's directory.
@@ -109,44 +173,27 @@ Project evidence can come from:
 - project-relative path mentions
 - extra `chat_project_terms` from `writing-sidecar.yaml`
 
-Vault-root sessions can also be excluded with `chat_exclude_terms` when they are really
-tooling/admin conversations that only mention story phrases in passing.
+Vault-root sessions can be excluded with `chat_exclude_terms` when they are really
+tooling/admin conversations.
 
-This is meant to catch real `writing-vault` root sessions without blindly attaching every
-vault-level chat to every project sidecar.
+## Scaffold Output
 
-## Search Workflow
+`writing-init` creates, without overwriting by default:
 
-When you use `--mine`, the default wing name is:
+- `writing-sidecar.yaml`
+- `logs/README.md`
+- `logs/audits/`
+- `logs/brainstorms/`
+- `logs/discarded_paths/`
+- `logs/templates/audit_snapshot.md`
+- `logs/templates/chapter_handoff.md`
+- `logs/templates/discarded_path.md`
 
-```text
-<project_slug>_writing_sidecar
-```
-
-For `Witcher-DC`, that means:
-
-```text
-witcher_dc_writing_sidecar
-```
-
-Example search:
-
-```powershell
-mempalace search "Arthur sponsorship" --wing witcher_dc_writing_sidecar --room chat_process
-```
-
-`writing-sync` runs that flow for you:
-
-- exports the sidecar corpus
-- mines it into the project sidecar palace
-- runs an optional search against the `witcher_dc_writing_sidecar` wing
+Use `--force` only when you want to replace the scaffold files.
 
 ## Notes
 
-- The sidecar palace should stay separate from your live project files.
-- `--refresh-palace` is useful when you want exact sync and do not want stale drawers from
-  files that were removed from the exported corpus.
-- `--runtime-root` is there if you want to pin the Chroma/model cache somewhere specific, but
-  the default vault-local runtime should be the headache-free path for agent use.
-- This branch is intentionally private and writing-specific. It is not designed for upstreaming
-  as-is.
+- Keep the sidecar palace separate from the live project files.
+- The sidecar is for archival/process memory, not live canon.
+- `writing-init` does not edit the vault root `.gitignore`; add `.sidecars/`, `.palaces/`, and `.mempalace-sidecar-runtime/` yourself if you want them ignored.
+- This branch is intentionally private and writing-specific. It is not designed for upstreaming as-is.
