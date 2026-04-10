@@ -20,6 +20,7 @@ The exporter:
 - skips live source-of-truth files like `AGENTS.md`, current notes, and active `Chapter *.txt`
 - normalizes matching Codex rollout JSONL into `chat_process`
 - writes a sidecar `mempalace.yaml` so the exported corpus is mineable immediately
+- uses a vault-local runtime cache for Chroma and the ONNX embedder during mine/search
 
 ## Basic Usage
 
@@ -44,6 +45,12 @@ mempalace writing-sync C:\Users\theab\Documents\writing-vault `
   --room chat_process
 ```
 
+By default, mining and search runtime files go under:
+
+```text
+<vault>\.mempalace-sidecar-runtime\<project_slug>\
+```
+
 Export, mine, and rebuild the target palace from scratch:
 
 ```powershell
@@ -57,6 +64,7 @@ mempalace writing-export C:\Users\theab\Documents\writing-vault `
   --project Witcher-DC `
   --out C:\Users\theab\Documents\writing-vault\.sidecars\witcher-dc `
   --mine `
+  --runtime-root C:\Users\theab\Documents\writing-vault\.mempalace-sidecar-runtime\witcher-dc `
   --sidecar-palace C:\Users\theab\Documents\writing-vault\.palaces\witcher-dc
 ```
 
@@ -131,5 +139,7 @@ mempalace search "Arthur sponsorship" --wing witcher_dc_writing_sidecar --room c
 - The sidecar palace should stay separate from your live project files.
 - `--refresh-palace` is useful when you want exact sync and do not want stale drawers from
   files that were removed from the exported corpus.
+- `--runtime-root` is there if you want to pin the Chroma/model cache somewhere specific, but
+  the default vault-local runtime should be the headache-free path for agent use.
 - This branch is intentionally private and writing-specific. It is not designed for upstreaming
   as-is.

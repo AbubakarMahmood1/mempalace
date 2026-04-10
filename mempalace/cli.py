@@ -177,6 +177,7 @@ def cmd_writing_export(args):
         discarded_paths=args.discarded_paths,
         mine_after_export=args.mine,
         palace_path=args.sidecar_palace,
+        runtime_root=args.runtime_root,
         refresh_palace=args.refresh_palace,
         dry_run=args.dry_run,
     )
@@ -187,6 +188,7 @@ def cmd_writing_sync(args):
     from .searcher import SearchError, search
     from .writing_export import (
         _project_wing,
+        _sidecar_runtime_environment,
         default_palace_dir,
         export_writing_corpus,
         print_export_summary,
@@ -204,6 +206,7 @@ def cmd_writing_sync(args):
         discarded_paths=args.discarded_paths,
         mine_after_export=True,
         palace_path=palace_path,
+        runtime_root=args.runtime_root,
         refresh_palace=args.refresh_palace,
         dry_run=False,
     )
@@ -213,13 +216,14 @@ def cmd_writing_sync(args):
         return
 
     try:
-        search(
-            query=args.query,
-            palace_path=summary["palace_path"] or palace_path,
-            wing=_project_wing(args.project),
-            room=args.room,
-            n_results=args.results,
-        )
+        with _sidecar_runtime_environment(Path(summary["runtime_root"])):
+            search(
+                query=args.query,
+                palace_path=summary["palace_path"] or palace_path,
+                wing=_project_wing(args.project),
+                room=args.room,
+                n_results=args.results,
+            )
     except SearchError:
         sys.exit(1)
 
@@ -572,6 +576,11 @@ def main():
         help="Palace directory for --mine (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
     )
     p_writing_export.add_argument(
+        "--runtime-root",
+        default=None,
+        help="Runtime/cache directory for sidecar mining (default: <vault>/.mempalace-sidecar-runtime/<project>)",
+    )
+    p_writing_export.add_argument(
         "--refresh-palace",
         action="store_true",
         help="If used with --mine, rebuild the target palace directory before mining",
@@ -630,6 +639,11 @@ def main():
         "--sidecar-palace",
         default=None,
         help="Palace directory for the synced sidecar (default: ~/.mempalace/palaces/<project>_writing_sidecar)",
+    )
+    p_writing_sync.add_argument(
+        "--runtime-root",
+        default=None,
+        help="Runtime/cache directory for sidecar mining and search (default: <vault>/.mempalace-sidecar-runtime/<project>)",
     )
     p_writing_sync.add_argument(
         "--refresh-palace",

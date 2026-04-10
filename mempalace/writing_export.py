@@ -12,6 +12,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +25,7 @@ DEFAULT_CODEX_HOME = Path(os.path.expanduser("~/.codex"))
 DEFAULT_STAGING_ROOT = Path(os.path.expanduser("~/.mempalace/staging"))
 DEFAULT_PALACE_ROOT = Path(os.path.expanduser("~/.mempalace/palaces"))
 DEFAULT_WRITING_CONFIG_FILENAMES = ("writing-sidecar.yaml", "writing-sidecar.yml")
+DEFAULT_RUNTIME_DIRNAME = ".mempalace-sidecar-runtime"
 FIXED_ROOMS = (
     "chat_process",
     "brainstorms",
@@ -73,6 +76,11 @@ def default_palace_dir(project: str) -> Path:
     return DEFAULT_PALACE_ROOT / f"{_project_slug(project)}_writing_sidecar"
 
 
+def default_runtime_dir(vault_root: Path, project: str) -> Path:
+    """Default runtime/cache directory for sidecar mining and search."""
+    return vault_root / DEFAULT_RUNTIME_DIRNAME / _project_slug(project)
+
+
 def export_writing_corpus(
     vault_dir: str,
     project: str,
@@ -84,6 +92,7 @@ def export_writing_corpus(
     discarded_paths=None,
     mine_after_export: bool = False,
     palace_path: str = None,
+    runtime_root: str = None,
     refresh_palace: bool = False,
     dry_run: bool = False,
 ) -> dict:
@@ -92,6 +101,11 @@ def export_writing_corpus(
     vault_root = resolve_vault_root(vault_dir, project_root)
     output_root = Path(out_dir).expanduser().resolve() if out_dir else default_output_dir(project)
     codex_root = Path(codex_home).expanduser().resolve() if codex_home else DEFAULT_CODEX_HOME
+    sidecar_runtime_root = (
+        Path(runtime_root).expanduser().resolve()
+        if runtime_root
+        else default_runtime_dir(vault_root, project).resolve()
+    )
     writing_config, loaded_config_path = _load_writing_export_config(project_root, config_path)
     config_base_dir = loaded_config_path.parent if loaded_config_path else project_root
     project_terms = _build_project_terms(
@@ -125,6 +139,7 @@ def export_writing_corpus(
         "loaded_config_path": str(loaded_config_path) if loaded_config_path else None,
         "generated_config_path": str(output_root / "mempalace.yaml"),
         "palace_path": None,
+        "runtime_root": str(sidecar_runtime_root),
         "mine_skipped": None,
     }
 
@@ -200,6 +215,7 @@ def export_writing_corpus(
                 output_root=output_root,
                 project=project,
                 palace_path=target_palace,
+                runtime_root=sidecar_runtime_root,
                 refresh_palace=refresh_palace,
             )
             summary["palace_path"] = str(target_palace)
@@ -223,6 +239,8 @@ def print_export_summary(summary: dict, dry_run: bool = False):
         print(f"  Config:  {summary['generated_config_path']}")
     if summary.get("palace_path"):
         print(f"  Palace:  {summary['palace_path']}")
+    if summary.get("runtime_root") and (summary.get("palace_path") or summary.get("mine_skipped")):
+        print(f"  Runtime: {summary['runtime_root']}")
     if summary.get("mine_skipped") == "dry_run":
         print("  Mine:    skipped because --dry-run was used")
     print("\n  By room:")
@@ -464,12 +482,14 @@ def _mine_exported_sidecar(
     output_root: Path,
     project: str,
     palace_path: Path,
+    runtime_root: Path,
     refresh_palace: bool = False,
 ):
     from .miner import mine
 
     output_root = output_root.resolve()
     palace_path = palace_path.expanduser().resolve()
+    runtime_root = runtime_root.expanduser().resolve()
 
     try:
         palace_path.relative_to(output_root)
@@ -478,20 +498,28 @@ def _mine_exported_sidecar(
     else:
         raise ValueError("Palace path must be outside the exported sidecar directory")
 
+    try:
+        runtime_root.relative_to(output_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Runtime root must be outside the exported sidecar directory")
+
     if refresh_palace and palace_path.exists():
         shutil.rmtree(palace_path)
 
-    _ensure_dir(palace_path)
-    mine(
-        project_dir=str(output_root),
-        palace_path=str(palace_path),
-        wing_override=_project_wing(project),
-        agent="writing_export",
-        limit=0,
-        dry_run=False,
-        respect_gitignore=True,
-        include_ignored=[],
-    )
+    with _sidecar_runtime_environment(runtime_root):
+        _ensure_dir(palace_path)
+        mine(
+            project_dir=str(output_root),
+            palace_path=str(palace_path),
+            wing_override=_project_wing(project),
+            agent="writing_export",
+            limit=0,
+            dry_run=False,
+            respect_gitignore=True,
+            include_ignored=[],
+        )
 
 
 def _payload_mentions_project(payload: dict, project_root: Path, project_terms: list) -> bool:
@@ -609,3 +637,71 @@ def _write_sidecar_config(output_root: Path, project: str):
     }
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+
+
+@contextmanager
+def _sidecar_runtime_environment(runtime_root: Path):
+    runtime_root = runtime_root.expanduser().resolve()
+    home_root = runtime_root / "home"
+    cache_root = runtime_root / "cache"
+    tmp_root = runtime_root / "tmp"
+    chroma_cache_root = cache_root / "chroma" / "onnx_models" / "all-MiniLM-L6-v2"
+
+    for path in (runtime_root, home_root, cache_root, tmp_root, chroma_cache_root):
+        _ensure_dir(path)
+
+    env_updates = {
+        "HOME": str(home_root),
+        "USERPROFILE": str(home_root),
+        "HOMEDRIVE": home_root.drive or "C:",
+        "HOMEPATH": str(home_root).replace(home_root.drive or "C:", "", 1) or "\\",
+        "TMP": str(tmp_root),
+        "TEMP": str(tmp_root),
+        "TMPDIR": str(tmp_root),
+        "XDG_CACHE_HOME": str(cache_root),
+        "HF_HOME": str(cache_root / "huggingface"),
+        "TRANSFORMERS_CACHE": str(cache_root / "huggingface" / "transformers"),
+        "CHROMA_CACHE_DIR": str(cache_root / "chroma"),
+    }
+    previous_env = {key: os.environ.get(key) for key in env_updates}
+    previous_tempdir = tempfile.tempdir
+    previous_download_path = None
+
+    try:
+        for key, value in env_updates.items():
+            os.environ[key] = value
+        tempfile.tempdir = str(tmp_root)
+        try:
+            from chromadb.api.client import SharedSystemClient
+
+            SharedSystemClient.clear_system_cache()
+        except Exception:
+            pass
+        try:
+            from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
+
+            previous_download_path = ONNXMiniLM_L6_V2.DOWNLOAD_PATH
+            ONNXMiniLM_L6_V2.DOWNLOAD_PATH = str(chroma_cache_root)
+        except Exception:
+            pass
+        yield runtime_root
+    finally:
+        try:
+            from chromadb.api.client import SharedSystemClient
+
+            SharedSystemClient.clear_system_cache()
+        except Exception:
+            pass
+        try:
+            from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
+
+            if previous_download_path is not None:
+                ONNXMiniLM_L6_V2.DOWNLOAD_PATH = previous_download_path
+        except Exception:
+            pass
+        tempfile.tempdir = previous_tempdir
+        for key, old_value in previous_env.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value

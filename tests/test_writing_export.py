@@ -11,6 +11,7 @@ from chromadb.api.client import SharedSystemClient
 
 from mempalace.writing_export import (
     _ensure_dir,
+    default_runtime_dir,
     export_writing_corpus,
     resolve_project_root,
 )
@@ -137,6 +138,7 @@ def test_export_writing_corpus_curates_rooms_and_skips_live_files():
         assert summary["rooms"]["archived_notes"] == 1
         assert summary["rooms"]["brainstorms"] == 1
         assert summary["rooms"]["audits"] == 0
+        assert summary["runtime_root"] == str(default_runtime_dir(vault_root.resolve(), "Witcher-DC"))
         assert str(project_root / "_story_bible" / "05_Current_Notes.md") in summary["skipped_live_files"]
     finally:
         cleanup_temp_dir(tmp_path)
@@ -204,8 +206,8 @@ def test_export_then_mine_sidecar_is_searchable():
         project_root = vault_root / "Witcher-DC"
         output_root = tmp_path / "sidecar"
         palace_root = tmp_path / "palace"
+        runtime_root = tmp_path / "runtime"
         codex_home = tmp_path / ".codex"
-        home_root = tmp_path / "subprocess-home"
 
         write_file(project_root / "_story_bible" / "research" / "atlantis.md", "Atlantis intake politics")
         write_file(project_root / "_story_bible" / "chapters" / "1. Chill.md", "Arthur sponsorship fallout")
@@ -214,20 +216,6 @@ def test_export_then_mine_sidecar_is_searchable():
             cwd=str(vault_root),
             user_text="Let's review Witcher-DC Arthur intake fallout.",
             assistant_text="Arthur takes responsibility for Ciri's Atlantis intake.",
-        )
-
-        _ensure_dir(home_root)
-        env = os.environ.copy()
-        env.update(
-            {
-                "HOME": str(home_root),
-                "USERPROFILE": str(home_root),
-                "HOMEDRIVE": home_root.drive or "C:",
-                "HOMEPATH": str(home_root).replace(home_root.drive or "C:", "", 1),
-                "TMP": str(home_root),
-                "TEMP": str(home_root),
-                "TMPDIR": str(home_root),
-            }
         )
 
         script = textwrap.dedent(
@@ -254,6 +242,7 @@ def test_export_then_mine_sidecar_is_searchable():
                     codex_home={str(codex_home)!r},
                     mine_after_export=True,
                     palace_path={str(palace_root)!r},
+                    runtime_root={str(runtime_root)!r},
                     refresh_palace=True,
                 )
                 results = search_memories(
@@ -265,6 +254,7 @@ def test_export_then_mine_sidecar_is_searchable():
                 )
 
             assert summary['palace_path'] == {str(palace_root.resolve())!r}
+            assert summary['runtime_root'] == {str(runtime_root.resolve())!r}
             assert not results.get('error')
             assert results['results']
             assert any('Arthur takes responsibility' in hit['text'] for hit in results['results'])
@@ -278,7 +268,6 @@ def test_export_then_mine_sidecar_is_searchable():
             check=True,
             capture_output=True,
             text=True,
-            env=env,
             cwd=str(Path(__file__).resolve().parents[1]),
         )
         assert "ok" in completed.stdout
@@ -293,8 +282,8 @@ def test_writing_sync_cli_mines_and_searches():
         project_root = vault_root / "Witcher-DC"
         output_root = tmp_path / "sidecar"
         palace_root = tmp_path / "palace"
+        runtime_root = tmp_path / "runtime"
         codex_home = tmp_path / ".codex"
-        home_root = tmp_path / "subprocess-home"
 
         write_file(project_root / "_story_bible" / "research" / "atlantis.md", "Atlantis intake politics")
         write_file(project_root / "_story_bible" / "chapters" / "1. Chill.md", "Arthur sponsorship fallout")
@@ -303,20 +292,6 @@ def test_writing_sync_cli_mines_and_searches():
             cwd=str(vault_root),
             user_text="Let's review Witcher-DC Arthur intake fallout.",
             assistant_text="Arthur takes responsibility for Ciri's Atlantis intake.",
-        )
-
-        _ensure_dir(home_root)
-        env = os.environ.copy()
-        env.update(
-            {
-                "HOME": str(home_root),
-                "USERPROFILE": str(home_root),
-                "HOMEDRIVE": home_root.drive or "C:",
-                "HOMEPATH": str(home_root).replace(home_root.drive or "C:", "", 1),
-                "TMP": str(home_root),
-                "TEMP": str(home_root),
-                "TMPDIR": str(home_root),
-            }
         )
 
         script = textwrap.dedent(
@@ -350,6 +325,8 @@ def test_writing_sync_cli_mines_and_searches():
                     {str(codex_home)!r},
                     '--sidecar-palace',
                     {str(palace_root)!r},
+                    '--runtime-root',
+                    {str(runtime_root)!r},
                     '--refresh-palace',
                     '--query',
                     'Arthur sponsorship',
@@ -367,6 +344,7 @@ def test_writing_sync_cli_mines_and_searches():
             assert 'Results for: "Arthur sponsorship"' in output
             assert 'Arthur takes responsibility for Ciri' in output
             assert {str(palace_root.resolve())!r} in output
+            assert {str(runtime_root.resolve())!r} in output
             SharedSystemClient.clear_system_cache()
             print('ok')
             """
@@ -377,7 +355,6 @@ def test_writing_sync_cli_mines_and_searches():
             check=True,
             capture_output=True,
             text=True,
-            env=env,
             cwd=str(Path(__file__).resolve().parents[1]),
         )
         assert "ok" in completed.stdout
@@ -405,6 +382,7 @@ def test_export_writing_corpus_dry_run_counts_without_writing():
         assert summary["rooms"]["research"] == 1
         assert summary["rooms"]["archived_notes"] == 1
         assert summary["mine_skipped"] == "dry_run"
+        assert summary["runtime_root"] == str(default_runtime_dir(tmp_path.resolve(), "Witcher-DC"))
         assert not output_root.exists()
     finally:
         cleanup_temp_dir(tmp_path)
