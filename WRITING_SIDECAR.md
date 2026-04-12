@@ -1,5 +1,7 @@
 # Writing Sidecar Workflow
 
+Legacy note: the standalone package at `AbubakarMahmood1/writing-sidecar` is now the canonical home for this workflow. This document remains here as branch-history/reference material for `private/writing-cdlc-sidecar`.
+
 This branch adds a private writing-sidecar layer for CDLC projects. The sidecar is
 process memory only. It stays separate from the live story bible and active chapter files.
 
@@ -196,4 +198,4 @@ Use `--force` only when you want to replace the scaffold files.
 - Keep the sidecar palace separate from the live project files.
 - The sidecar is for archival/process memory, not live canon.
 - `writing-init` does not edit the vault root `.gitignore`; add `.sidecars/`, `.palaces/`, and `.mempalace-sidecar-runtime/` yourself if you want them ignored.
-- This branch is intentionally private and writing-specific. It is not designed for upstreaming as-is.
+- This branch is legacy/reference only now. New writing-sidecar feature work should land in the standalone `writing-sidecar` repo instead of MemPalace core.
