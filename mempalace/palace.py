@@ -6,11 +6,14 @@ Consolidates collection access patterns used by both miners and the MCP server.
 
 import contextlib
 import hashlib
+import logging
 import os
 import re
 import threading
 
 from .backends.chroma import ChromaBackend
+
+logger = logging.getLogger("mempalace_mcp")
 
 SKIP_DIRS = {
     ".git",
@@ -229,7 +232,7 @@ def purge_file_closets(closets_col, source_file: str) -> None:
     try:
         closets_col.delete(where={"source_file": source_file})
     except Exception:
-        pass
+        logger.debug("Closet purge failed for %s", source_file, exc_info=True)
 
 
 def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):
@@ -307,7 +310,7 @@ def mine_lock(source_file: str):
 
                 fcntl.flock(lf, fcntl.LOCK_UN)
         except Exception:
-            pass
+            logger.debug("Mine-lock release failed", exc_info=True)
         lf.close()
 
 

@@ -900,7 +900,7 @@ def tool_add_drawer(
         if existing and existing["ids"]:
             return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
     except Exception:
-        pass
+        logger.debug("Idempotency pre-check failed for %s", drawer_id, exc_info=True)
 
     try:
         col.upsert(
@@ -1418,7 +1418,7 @@ def tool_hook_settings(silent_save: bool = None, desktop_toast: bool = None):
     try:
         config = MempalaceConfig()
     except Exception:
-        pass
+        logger.debug("Could not re-read config after update", exc_info=True)
 
     result = {
         "success": True,
