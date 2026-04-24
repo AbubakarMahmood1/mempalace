@@ -114,6 +114,13 @@ def test_dict_format_existing_category_gets_new_keys(temp_registry):
     assert data["people"]["Carol"] is None
 
 
+def test_dict_format_dedupes_case_insensitively_and_stringifies_new_names(temp_registry):
+    temp_registry.write_text(json.dumps({"people": {"Alice": "ALC"}}))
+    miner.add_to_known_entities({"people": ["alice", 123]})
+    data = json.loads(temp_registry.read_text())
+    assert data["people"] == {"Alice": "ALC", "123": None}
+
+
 # ── error tolerance ───────────────────────────────────────────────────
 
 

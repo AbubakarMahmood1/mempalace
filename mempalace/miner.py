@@ -507,6 +507,12 @@ def add_to_known_entities(entities_by_category: dict) -> str:
         except (_json.JSONDecodeError, OSError):
             existing = {}
 
+    def _coerce_name(value):
+        if not value:
+            return None
+        name = str(value)
+        return name if name else None
+
     for category, names in entities_by_category.items():
         if not isinstance(names, list) or not names:
             continue
@@ -514,27 +520,33 @@ def add_to_known_entities(entities_by_category: dict) -> str:
         if isinstance(current, list):
             seen_lower = {str(n).lower() for n in current}
             for n in names:
-                if not n:
+                name = _coerce_name(n)
+                if not name:
                     continue
-                if str(n).lower() not in seen_lower:
-                    current.append(n)
-                    seen_lower.add(str(n).lower())
+                if name.lower() not in seen_lower:
+                    current.append(name)
+                    seen_lower.add(name.lower())
         elif isinstance(current, dict):
+            seen_lower = {str(name).lower() for name in current}
             for n in names:
-                if n and n not in current:
-                    current[n] = None
+                name = _coerce_name(n)
+                if not name or name.lower() in seen_lower:
+                    continue
+                current[name] = None
+                seen_lower.add(name.lower())
         else:
             # Missing or unrecognized shape — seed as a fresh list, deduped
             seen: set = set()
             ordered: list = []
             for n in names:
-                if not n:
+                name = _coerce_name(n)
+                if not name:
                     continue
-                key = str(n).lower()
+                key = name.lower()
                 if key in seen:
                     continue
                 seen.add(key)
-                ordered.append(n)
+                ordered.append(name)
             existing[category] = ordered
 
     registry_path.write_text(_json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")

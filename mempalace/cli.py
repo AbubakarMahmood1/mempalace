@@ -125,7 +125,7 @@ def cmd_init(args):
         # global registry the miner reads at mine time.
         if confirmed["people"] or confirmed["projects"]:
             entities_path = Path(args.dir).expanduser().resolve() / "entities.json"
-            with open(entities_path, "w") as f:
+            with open(entities_path, "w", encoding="utf-8") as f:
                 json.dump(confirmed, f, indent=2, ensure_ascii=False)
             print(f"  Entities saved: {entities_path}")
 
