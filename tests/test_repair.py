@@ -682,3 +682,294 @@ def test_max_seq_id_rollback_on_verification_failure(tmp_path, monkeypatch):
     # A backup file is still present — caller can roll back from it.
     leftover = [fn for fn in os.listdir(palace) if "max-seq-id-backup-" in fn]
     assert leftover
+
+
+# ── extract_via_sqlite + rebuild_from_sqlite (#1308) ──────────────────
+#
+# These tests build real chromadb palaces in tmp_path rather than mocking
+# the SQLite layer. The bug class they guard against is "extraction sees
+# different rows than chromadb stored" — the only honest check is to let
+# chromadb actually write rows and then read them back via the SQLite
+# bypass. Mocking the SQLite cursor would defeat the test.
+
+
+def _seed_palace(palace_path, collection_name, rows):
+    """Build a real chromadb palace at ``palace_path`` and add ``rows``.
+
+    ``rows`` is a list of ``(id, document, metadata)`` tuples. Returns
+    the populated collection so callers can assert on the writer's view
+    of state before the SQLite read.
+    """
+    from mempalace.backends.chroma import ChromaBackend
+
+    backend = ChromaBackend()
+    col = backend.create_collection(str(palace_path), collection_name)
+    col.upsert(
+        ids=[r[0] for r in rows],
+        documents=[r[1] for r in rows],
+        metadatas=[r[2] for r in rows],
+    )
+    return col
+
+
+def test_extract_via_sqlite_returns_all_rows_with_metadata(tmp_path):
+    """Round-trip: a chromadb palace with N upserted rows returns those
+    same N rows when read via the SQLite bypass.
+
+    Catches: anyone who breaks the segments/embeddings/embedding_metadata
+    JOIN, swaps the metadata vs vector segment, or changes how the
+    document is stored under the ``chroma:document`` key.
+    """
+    rows = [
+        (f"drawer_{i:03d}", f"document body {i}", {"wing": "test_wing", "room": f"r{i % 3}"})
+        for i in range(25)
+    ]
+    _seed_palace(tmp_path, "mempalace_drawers", rows)
+
+    extracted = list(repair.extract_via_sqlite(str(tmp_path), "mempalace_drawers"))
+
+    assert len(extracted) == 25
+    by_id = {emb_id: (doc, meta) for emb_id, doc, meta in extracted}
+    assert set(by_id) == {r[0] for r in rows}
+    for emb_id, doc, meta in rows:
+        got_doc, got_meta = by_id[emb_id]
+        assert got_doc == doc, f"document mangled for {emb_id}"
+        assert got_meta == meta, f"metadata mangled for {emb_id}: {got_meta!r}"
+
+
+def test_extract_via_sqlite_preserves_typed_metadata(tmp_path):
+    """Chromadb stores int / float / bool / string in distinct typed
+    columns. Extraction must round-trip the original type, not coerce
+    everything to string.
+
+    Catches: a regression where the SELECT order changes and ints come
+    back as None, or where the column-resolution rule prefers the wrong
+    column.
+    """
+    rows = [
+        (
+            "drawer_typed",
+            "doc",
+            {
+                "wing": "w",
+                "chunk_index": 7,  # int
+                "score": 0.42,  # float
+                "is_active": True,  # bool
+            },
+        ),
+    ]
+    _seed_palace(tmp_path, "mempalace_drawers", rows)
+
+    extracted = list(repair.extract_via_sqlite(str(tmp_path), "mempalace_drawers"))
+    assert len(extracted) == 1
+    _, _, meta = extracted[0]
+
+    assert meta["chunk_index"] == 7 and isinstance(meta["chunk_index"], int)
+    assert meta["score"] == 0.42 and isinstance(meta["score"], float)
+    assert meta["is_active"] is True
+    assert meta["wing"] == "w"
+
+
+def test_extract_via_sqlite_unknown_collection_yields_nothing(tmp_path):
+    """Asking for a collection that isn't in the palace must return an
+    empty iterator, not silently fall back to another collection's
+    metadata segment. Seeds two real collections and queries for a third
+    name so a regression that drops the WHERE c.name=? filter would leak
+    rows from the seeded collections rather than passing.
+    """
+    _seed_palace(tmp_path, "mempalace_drawers", [("d1", "doc", {"wing": "w"})])
+    _seed_palace(tmp_path, "mempalace_closets", [("c1", "abbrev", {"wing": "w"})])
+    assert list(repair.extract_via_sqlite(str(tmp_path), "not_a_real_collection")) == []
+
+
+def test_extract_via_sqlite_missing_palace_yields_nothing(tmp_path):
+    """No chroma.sqlite3 → empty iterator, no exception. Callers depend
+    on this when probing speculatively."""
+    empty = tmp_path / "no_palace_here"
+    empty.mkdir()
+    assert list(repair.extract_via_sqlite(str(empty), "mempalace_drawers")) == []
+
+
+def test_rebuild_from_sqlite_roundtrips_via_real_chromadb(tmp_path):
+    """End-to-end: seed source palace, rebuild into a fresh dest, then
+    open dest with a fresh ChromaBackend and verify ``count()`` and
+    metadata filters return the original rows. Also asserts a closet
+    document round-trips so a future regression that re-embeds with the
+    wrong EF or swaps drawer/closet content would fail here.
+
+    This is the single most important regression guard. If
+    ``rebuild_from_sqlite`` silently drops rows or mangles metadata, no
+    other test in this file would catch it because they all stop at the
+    extraction layer.
+    """
+    from mempalace.backends.chroma import ChromaBackend
+
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+
+    rows = [
+        (f"drawer_{i:03d}", f"body {i}", {"wing": "alpha" if i % 2 else "beta", "room": "r0"})
+        for i in range(40)
+    ]
+    _seed_palace(source, "mempalace_drawers", rows)
+    _seed_palace(
+        source,
+        "mempalace_closets",
+        [("closet_x", "abbrev pointer →drawer_001", {"wing": "alpha"})],
+    )
+
+    counts = repair.rebuild_from_sqlite(str(source), str(dest))
+    assert counts == {"mempalace_drawers": 40, "mempalace_closets": 1}
+
+    backend = ChromaBackend()
+    drawers = backend.get_collection(str(dest), "mempalace_drawers")
+    assert drawers.count() == 40
+    alpha = drawers.get(where={"wing": "alpha"})
+    assert len(alpha["ids"]) == 20
+
+    # Spot-check that document text round-trips for one specific drawer
+    # — protects against a regression where extraction or upsert order
+    # silently swaps document bodies between IDs.
+    one = drawers.get(ids=["drawer_007"], include=["documents", "metadatas"])
+    assert one["documents"] == ["body 7"]
+    assert one["metadatas"][0]["wing"] == "alpha"
+
+    # Closets: the AAAK index layer. Re-embedded with the same EF so a
+    # known closet ID and its document body must come back intact.
+    closets = backend.get_collection(str(dest), "mempalace_closets")
+    assert closets.count() == 1
+    closet_row = closets.get(ids=["closet_x"], include=["documents", "metadatas"])
+    assert closet_row["documents"] == ["abbrev pointer →drawer_001"]
+    assert closet_row["metadatas"][0] == {"wing": "alpha"}
+
+
+def test_rebuild_from_sqlite_refuses_existing_dest(tmp_path):
+    """Refuse to write into a directory that already exists when source
+    and dest differ. Without this, an unattended re-run would silently
+    interleave a partial rebuild with whatever's already at dest.
+    """
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+    _seed_palace(source, "mempalace_drawers", [("d1", "doc", {"wing": "w"})])
+    dest.mkdir()
+    # Drop a marker file so we can prove the dir wasn't touched.
+    (dest / "marker.txt").write_text("preexisting")
+
+    counts = repair.rebuild_from_sqlite(str(source), str(dest))
+    assert counts == {}
+    assert (dest / "marker.txt").read_text() == "preexisting"
+    assert not (dest / "chroma.sqlite3").exists()
+
+
+def test_rebuild_from_sqlite_in_place_archives_when_opted_in(tmp_path):
+    """In-place rebuild (source == dest) with ``archive_existing_dest=True``
+    must move the original aside to ``<dest>.pre-rebuild-<ts>`` and read
+    from the archive — the original drawer rows must survive in the new
+    palace, AND the archive itself must still contain the original rows.
+
+    Catches: a refactor that moves the original out but then reads from
+    the now-empty original location, producing an empty rebuild; also
+    catches a swap that empties the archive after reading.
+    """
+    palace = tmp_path / "palace"
+    rows = [(f"d{i}", f"body {i}", {"wing": "w", "room": "r"}) for i in range(15)]
+    _seed_palace(palace, "mempalace_drawers", rows)
+
+    counts = repair.rebuild_from_sqlite(str(palace), str(palace), archive_existing_dest=True)
+    assert counts["mempalace_drawers"] == 15
+
+    archives = [p for p in tmp_path.iterdir() if p.name.startswith("palace.pre-rebuild-")]
+    assert len(archives) == 1
+    assert (archives[0] / "chroma.sqlite3").exists()
+    # Archive must still hold the same row count via the SQLite bypass —
+    # proves the archive wasn't silently truncated as a side effect.
+    archived_rows = list(repair.extract_via_sqlite(str(archives[0]), "mempalace_drawers"))
+    assert len(archived_rows) == 15
+
+    from mempalace.backends.chroma import ChromaBackend
+
+    rebuilt = ChromaBackend().get_collection(str(palace), "mempalace_drawers")
+    assert rebuilt.count() == 15
+
+
+def test_rebuild_from_sqlite_in_place_refuses_without_archive_flag(tmp_path):
+    """Source == dest without archive flag must abort untouched. The
+    most catastrophic possible regression of this code path is silently
+    deleting the only copy of the user's data."""
+    palace = tmp_path / "palace"
+    _seed_palace(palace, "mempalace_drawers", [("d1", "doc", {"wing": "w"})])
+    sqlite_before = (palace / "chroma.sqlite3").stat().st_size
+
+    counts = repair.rebuild_from_sqlite(str(palace), str(palace))
+    assert counts == {}
+    # Same file, untouched.
+    assert (palace / "chroma.sqlite3").stat().st_size == sqlite_before
+    archives = [p for p in tmp_path.iterdir() if "pre-rebuild" in p.name]
+    assert archives == []
+
+
+def test_rebuild_from_sqlite_source_missing_chroma_db(tmp_path):
+    """Source dir exists but has no chroma.sqlite3 → returns empty,
+    leaves dest untouched."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "stray_file").write_text("not a palace")
+    dest = tmp_path / "dest"
+
+    counts = repair.rebuild_from_sqlite(str(source), str(dest))
+    assert counts == {}
+    assert not dest.exists()
+
+
+def test_rebuild_from_sqlite_in_place_validates_source_before_archiving(tmp_path):
+    """In-place + archive_existing_dest=True with a dir that lacks
+    chroma.sqlite3 must NOT rename the dir before bailing. An earlier
+    revision archived first and validated second, leaving the user with
+    a renamed empty dir to manually undo. Catches that ordering bug.
+    """
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    (palace / "marker.txt").write_text("not a real palace")
+
+    counts = repair.rebuild_from_sqlite(str(palace), str(palace), archive_existing_dest=True)
+    assert counts == {}
+    # No archive created — original dir still in place with its marker.
+    assert palace.exists()
+    assert (palace / "marker.txt").read_text() == "not a real palace"
+    archives = [p for p in tmp_path.iterdir() if "pre-rebuild" in p.name]
+    assert archives == []
+
+
+def test_rebuild_from_sqlite_raises_on_upsert_failure(tmp_path, monkeypatch):
+    """Mid-batch upsert failure must raise ``RebuildPartialError`` and
+    surface the failed collection + archive path so the user can recover.
+    Without this, an unattended script gets exit-code-zero on a partial
+    rebuild and the user discovers the data loss only when search starts
+    returning fewer hits.
+    """
+    palace = tmp_path / "palace"
+    rows = [(f"d{i}", f"body {i}", {"wing": "w", "room": "r"}) for i in range(5)]
+    _seed_palace(palace, "mempalace_drawers", rows)
+
+    # Make the very first upsert raise so we don't depend on batch
+    # boundary behavior. Patching ChromaCollection.upsert (the wrapper
+    # mempalace's backend returns) keeps the failure path realistic.
+    # ``monkeypatch`` is pytest's built-in fixture that auto-restores
+    # the original attribute when the test exits, so we don't need to
+    # undo this manually.
+    from mempalace.backends.chroma import ChromaCollection
+
+    def boom(self, **kwargs):
+        raise RuntimeError("simulated chromadb upsert failure")
+
+    monkeypatch.setattr(ChromaCollection, "upsert", boom)
+
+    with pytest.raises(repair.RebuildPartialError) as excinfo:
+        repair.rebuild_from_sqlite(str(palace), str(palace), archive_existing_dest=True)
+
+    err = excinfo.value
+    assert err.failed_collection == "mempalace_drawers"
+    assert err.partial_counts.get("mempalace_drawers") == 0
+    assert err.archive_path is not None
+    assert os.path.isfile(os.path.join(err.archive_path, "chroma.sqlite3"))
+    assert err.dest_palace == os.path.abspath(str(palace))
