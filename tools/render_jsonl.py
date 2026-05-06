@@ -11,7 +11,8 @@ Usage:
 
 Stdlib only. Python 3.9+. Read-only on the input.
 """
-import json, sys
+import json
+import sys
 from pathlib import Path
 
 def extract_text(content):
@@ -29,10 +30,12 @@ def extract_text(content):
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__); sys.exit(1)
+        print(__doc__)
+        sys.exit(1)
     src = Path(sys.argv[1])
     if not src.is_file():
-        print(f"ERROR: not a file: {src}"); sys.exit(1)
+        print(f"ERROR: not a file: {src}")
+        sys.exit(1)
     out = open(sys.argv[2], "w", encoding="utf-8") if len(sys.argv) > 2 else sys.stdout
 
     turns, stamps = [], []
@@ -51,7 +54,8 @@ def main():
         if not text:
             continue
         ts = obj.get("timestamp") or ""
-        if ts: stamps.append(ts)
+        if ts:
+            stamps.append(ts)
         turns.append((ts, role, text))
 
     header = [
