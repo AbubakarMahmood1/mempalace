@@ -1969,7 +1969,11 @@ SUPPORTED_PROTOCOL_VERSIONS = [
 
 def handle_request(request):
     if not isinstance(request, dict):
-        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request"},
+        }
     method = request.get("method") or ""
     params = request.get("params") or {}
     req_id = request.get("id")
@@ -2011,7 +2015,10 @@ def handle_request(request):
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32602, "message": "Invalid params: 'name' is required for tools/call"},
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid params: 'name' is required for tools/call",
+                },
             }
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
