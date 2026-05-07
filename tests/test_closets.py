@@ -605,6 +605,26 @@ class TestDiaryIngest:
         result = ingest_diaries(str(diary_dir), str(palace_dir))
         assert result["days_updated"] == 0
 
+    def test_ingest_detects_same_size_content_edit(self, tmp_path):
+        # Regression #925: the prior skip-check compared byte length only, so
+        # any in-place edit preserving total length (e.g. typo fix "teh"→"the")
+        # was silently dropped. Content-hash check must catch it.
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_file = diary_dir / "2026-04-13.md"
+        original = "# 2026-04-13\n\n## 10:00 — Test\n\nThe quick brown fox jumps over.\n"
+        edited = "# 2026-04-13\n\n## 10:00 — Test\n\nTeh quick brown fox jumps over.\n"
+        assert len(original) == len(edited), "test setup: edited content must be same length"
+        diary_file.write_text(original)
+        palace_dir = tmp_path / "palace"
+
+        from mempalace.diary_ingest import ingest_diaries
+
+        ingest_diaries(str(diary_dir), str(palace_dir), force=True)
+        diary_file.write_text(edited)
+        result = ingest_diaries(str(diary_dir), str(palace_dir))
+        assert result["days_updated"] == 1, "same-size content edit must trigger re-ingest"
+
     def test_state_file_lives_outside_diary_dir(self, tmp_path):
         # Regression: the original implementation wrote
         # ``.diary_ingest_state.json`` *inside* the user's diary directory,
