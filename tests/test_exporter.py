@@ -134,3 +134,45 @@ def test_export_empty_palace():
         assert stats == {"wings": 0, "rooms": 0, "drawers": 0}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_export_refuses_symlinked_output_dir():
+    """A symlink at the output path must not be followed (defense-in-depth)."""
+    import pytest
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        palace_path = _setup_palace(tmpdir)
+        decoy_target = os.path.join(tmpdir, "decoy_target")
+        os.makedirs(decoy_target)
+        output_dir = os.path.join(tmpdir, "export")
+        os.symlink(decoy_target, output_dir)
+
+        with pytest.raises(ValueError, match="symbolic link"):
+            export_palace(palace_path, output_dir)
+
+        # Decoy target must remain empty — nothing followed the symlink.
+        assert os.listdir(decoy_target) == []
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_export_refuses_symlinked_wing_dir():
+    """A symlink pre-placed at a wing subdirectory must also be refused."""
+    import pytest
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        palace_path = _setup_palace(tmpdir)
+        decoy_target = os.path.join(tmpdir, "decoy_target")
+        os.makedirs(decoy_target)
+        output_dir = os.path.join(tmpdir, "export")
+        os.makedirs(output_dir)
+        os.symlink(decoy_target, os.path.join(output_dir, "alpha"))
+
+        with pytest.raises(ValueError, match="symbolic link"):
+            export_palace(palace_path, output_dir)
+
+        assert os.listdir(decoy_target) == []
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

@@ -26,6 +26,20 @@ def _safe_path_component(name: str) -> str:
     return name or "unknown"
 
 
+def _reject_symlink(path: str, label: str) -> None:
+    """Refuse to write into a path that is itself a symlink.
+
+    Defense-in-depth: a pre-placed symlink at the export target would
+    redirect writes to wherever it points (e.g., system directories).
+    Mirrors the miner's input-side caution.
+    """
+    if os.path.islink(path):
+        raise ValueError(
+            f"refusing to export: {label} is a symbolic link ({path!r}). "
+            f"Remove the symlink or choose a different output path."
+        )
+
+
 def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -> dict:
     """Export all palace drawers as markdown files organized by wing/room.
 
@@ -48,6 +62,7 @@ def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -
         print("  Palace is empty — nothing to export.")
         return {"wings": 0, "rooms": 0, "drawers": 0}
 
+    _reject_symlink(output_dir, "output_dir")
     os.makedirs(output_dir, exist_ok=True)
     try:
         os.chmod(output_dir, 0o700)
@@ -89,6 +104,7 @@ def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -
             safe_wing = _safe_path_component(wing)
             wing_dir = os.path.join(output_dir, safe_wing)
             if wing_dir not in created_wing_dirs:
+                _reject_symlink(wing_dir, f"wing directory {safe_wing!r}")
                 os.makedirs(wing_dir, exist_ok=True)
                 try:
                     os.chmod(wing_dir, 0o700)
