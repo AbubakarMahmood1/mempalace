@@ -200,7 +200,7 @@ class TestCallLLM:
             patch("urllib.request.urlopen", side_effect=fake_urlopen),
             patch("mempalace.closet_llm.time.sleep"),
         ):
-            parsed, usage = _call_llm(cfg, "/tmp/x", "w", "r", "c")
+            parsed, _ = _call_llm(cfg, "/tmp/x", "w", "r", "c")
         assert parsed is None
 
     def test_retries_on_json_decode_error(self):
@@ -220,7 +220,7 @@ class TestCallLLM:
             patch("urllib.request.urlopen", side_effect=fake_urlopen),
             patch("mempalace.closet_llm.time.sleep"),
         ):
-            parsed, usage = _call_llm(cfg, "/tmp/x", "w", "r", "c")
+            parsed, _ = _call_llm(cfg, "/tmp/x", "w", "r", "c")
         assert parsed is None
         assert call_count["n"] == 3
 
