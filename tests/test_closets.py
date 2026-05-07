@@ -650,8 +650,11 @@ class TestDiaryIngest:
         diary_dir = tmp_path / "diaries"
         diary_dir.mkdir()
         diary_file = diary_dir / "2026-04-13.md"
+        # Write explicit UTF-8 so the round-trip matches how diary_ingest reads.
+        # Windows' default text-mode encoding is cp1252; without this the em
+        # dash would round-trip lossy and the hash assertion below would fail.
         text = "# 2026-04-13\n\n## 10:00 — Test\n\nUnchanged body content here.\n"
-        diary_file.write_text(text)
+        diary_file.write_text(text, encoding="utf-8")
         palace_dir = tmp_path / "palace"
 
         from mempalace.diary_ingest import _state_file_for, ingest_diaries
