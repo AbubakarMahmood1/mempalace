@@ -260,6 +260,7 @@ def test_mcp_probe_does_not_disable_vectors_for_unflushed_metadata(tmp_path, mon
 
     class _Cfg:
         palace_path = str(tmp_path)
+        collection_name = "mempalace_drawers"
 
     monkeypatch.setattr(mcp_server, "_config", _Cfg())
     monkeypatch.setattr(mcp_server, "_vector_disabled", True)
@@ -625,6 +626,7 @@ def test_tool_status_via_sqlite_returns_breakdown(palace_with_drawers, monkeypat
     # MempalaceConfig.
     class _Cfg:
         palace_path = str(palace_with_drawers)
+        collection_name = "mempalace_drawers"
 
     monkeypatch.setattr(mcp_server, "_config", _Cfg())
     monkeypatch.setattr(mcp_server, "_vector_disabled", True)

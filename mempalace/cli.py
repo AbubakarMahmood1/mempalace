@@ -663,8 +663,10 @@ def cmd_repair(args):
         check_extraction_safety,
     )
 
+    config = MempalaceConfig()
+    collection_name = config.collection_name
     palace_path = os.path.abspath(
-        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+        os.path.expanduser(args.palace) if args.palace else config.palace_path
     )
 
     if getattr(args, "mode", "legacy") == "max-seq-id":
@@ -749,7 +751,7 @@ def cmd_repair(args):
 
     # Try to read existing drawers
     try:
-        col = backend.get_collection(palace_path, "mempalace_drawers")
+        col = backend.get_collection(palace_path, collection_name)
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -784,6 +786,7 @@ def cmd_repair(args):
             palace_path,
             len(all_ids),
             confirm_truncation_ok=getattr(args, "confirm_truncation_ok", False),
+            collection_name=collection_name,
         )
     except TruncationDetected as e:
         print(e.message)
@@ -810,6 +813,7 @@ def cmd_repair(args):
             all_docs,
             all_metas,
             batch_size,
+            collection_name=collection_name,
             progress=print,
         )
     except RebuildCollectionError as e:
