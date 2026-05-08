@@ -12,7 +12,7 @@ import chromadb
 import pytest
 
 
-def _seed_drawers(palace_path, repo_path, deleted_path):
+def _seed_drawers(palace_path, repo_path, deleted_path, elsewhere_path):
     """Populate the drawers collection with 6 entries covering all buckets."""
     client = chromadb.PersistentClient(path=palace_path)
     col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
@@ -61,7 +61,7 @@ def _seed_drawers(palace_path, repo_path, deleted_path):
         {
             "wing": "demo",
             "room": "elsewhere",
-            "source_file": "/tmp/elsewhere/x.md",
+            "source_file": str(elsewhere_path),
             "chunk_index": 0,
             "added_by": "miner",
             "filed_at": "2026-05-09T00:00:00",
@@ -104,7 +104,10 @@ def synced_world(tmp_dir, palace_path):
     deleted.write_text("# was here\n")
     deleted.unlink()
 
-    _seed_drawers(palace_path, repo_path, deleted)
+    # Use tmp_dir for an absolute path; `/tmp/...` literals are not absolute on Windows.
+    elsewhere = Path(tmp_dir) / "elsewhere" / "x.md"
+
+    _seed_drawers(palace_path, repo_path, deleted, elsewhere)
     return {"palace_path": palace_path, "repo_path": str(repo_path)}
 
 
