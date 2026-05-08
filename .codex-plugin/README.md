@@ -39,11 +39,16 @@ git clone https://github.com/MemPalace/mempalace.git
 cd mempalace
 ```
 
-2. Install the Python package (uv recommended):
+2. Install the Python package so the `mempalace-mcp` script lands on
+   your PATH (the bundled `plugin.json` invokes it by bare name):
 
 ```bash
-uv sync   # or: pip install -e .
+uv tool install --editable .   # or: pip install -e .
 ```
+
+   Plain `uv sync` is **not** enough here — it installs the scripts into
+   `.venv/bin/`, which Codex will not find unless you activate the venv
+   before launching Codex.
 
 3. The `.codex-plugin` directory is already in the repo root. Codex CLI will detect it automatically when you run Codex from inside the repository.
 

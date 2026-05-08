@@ -11,12 +11,15 @@ tell the user they need Python 3.9+ installed and stop.
 
 ## Step 2: Check if mempalace is already installed
 
-Run `mempalace --version` to see if the CLI is already on the user's PATH.
-If it succeeds, report the installed version and skip to Step 4.
+Run `mempalace --version`. If it succeeds, the CLI is on PATH — report
+the installed version and skip to Step 4.
 
-If that fails, fall back to `pip show mempalace` (and `uv tool list` if `uv`
-is available) to detect an existing install. If found, report it and skip
-to Step 4.
+If `mempalace --version` fails, **do not** skip to Step 4 just because
+`pip show mempalace` or `uv tool list` reports the package as installed:
+the package may live inside a venv that isn't activated, in which case
+Step 5 (`mempalace init ...`) will fail with `command not found`. Treat
+that case as not-installed and continue to Step 3, which will (re)install
+into a PATH-visible location via `uv tool install` or `pip`.
 
 ## Step 3: Install mempalace
 
