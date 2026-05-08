@@ -22,7 +22,6 @@ from .palace import (
     get_closets_collection,
     get_collection,
     mine_palace_lock,
-    purge_file_closets,
 )
 
 
@@ -44,16 +43,18 @@ class SyncReport(TypedDict):
 
 
 def _resolve_project_root(source_file: Path, project_roots: list) -> Optional[Path]:
-    """Return the longest project_root that source_file lives under."""
-    best: Optional[Path] = None
+    """Return the longest project_root that source_file lives under.
+
+    Assumes ``project_roots`` is sorted by path-length descending so the
+    first match is the longest (deepest) prefix.
+    """
     for root in project_roots:
         try:
             source_file.relative_to(root)
+            return root
         except ValueError:
             continue
-        if best is None or len(str(root)) > len(str(best)):
-            best = root
-    return best
+    return None
 
 
 def _ancestor_matchers(source_file: Path, root: Path, matcher_cache: dict) -> list:
@@ -102,6 +103,7 @@ def _classify_drawer(
 
     Returns one of: kept, gitignored, missing, no_source, out_of_scope.
     """
+    # Defensive: main loop filters registry rows; this guards direct callers.
     if _is_registry_row(meta, drawer_id):
         return "kept"
 
@@ -112,6 +114,7 @@ def _classify_drawer(
     src = Path(source_file)
     if not src.is_absolute():
         return "no_source"
+    src = src.resolve(strict=False)
 
     root = _resolve_project_root(src, project_roots)
     if root is None:
@@ -154,12 +157,17 @@ def _auto_detect_project_roots(col, wing: Optional[str]) -> list:
     a `.git` directory or a `.gitignore` file. The deepest such ancestor
     wins, so nested-but-still-tracked subprojects are honoured.
     `Path.parents` iterates deepest-first, so the first hit IS deepest.
+
+    Dedupes on ``source_file`` string so a 200-chunk file costs one disk
+    walk, not 200.
     """
-    roots = set()
+    roots: set = set()
+    seen_sources: set = set()
     for _, meta in _iter_drawer_metadata(col, wing):
         source_file = (meta or {}).get("source_file")
-        if not source_file:
+        if not source_file or source_file in seen_sources:
             continue
+        seen_sources.add(source_file)
         src = Path(source_file)
         if not src.is_absolute():
             continue
@@ -167,13 +175,13 @@ def _auto_detect_project_roots(col, wing: Optional[str]) -> list:
             if (parent / ".git").exists() or (parent / ".gitignore").is_file():
                 roots.add(parent.resolve(strict=False))
                 break
-    # Sort by depth (deepest first) with secondary lexicographic key for
-    # deterministic order when two roots share string length.
     return sorted(roots, key=lambda p: (-len(str(p)), str(p)))
 
 
 def _normalize_project_dirs(project_dirs) -> list:
-    return [Path(p).resolve(strict=False) for p in project_dirs]
+    """Resolve and sort project dirs so deepest-prefix wins on first match."""
+    resolved = [Path(p).resolve(strict=False) for p in project_dirs]
+    return sorted(resolved, key=lambda p: (-len(str(p)), str(p)))
 
 
 def _delete_in_batches(col, ids: list, batch_size: int, wal_log: Optional[Callable]):
@@ -246,17 +254,30 @@ def sync_palace(
             roots = _auto_detect_project_roots(col, wing)
 
         matcher_cache: dict = {}
+        # Same source_file → same verdict holds because mine_palace_lock
+        # blocks concurrent writers and the loop is synchronous.
+        classification_cache: dict = {}
 
         for drawer_id, meta in _iter_drawer_metadata(col, wing):
             counts["scanned"] += 1
-            bucket = _classify_drawer(meta or {}, matcher_cache, roots, drawer_id)
+            meta = meta or {}
+            source_file = meta.get("source_file")
+
+            if _is_registry_row(meta, drawer_id):
+                bucket = "kept"
+            elif source_file and source_file in classification_cache:
+                bucket = classification_cache[source_file]
+            else:
+                bucket = _classify_drawer(meta, matcher_cache, roots, drawer_id)
+                if source_file:
+                    classification_cache[source_file] = bucket
+
             counts[bucket] += 1
             if bucket in ("gitignored", "missing"):
                 removable_ids.append(drawer_id)
-                src = (meta or {}).get("source_file")
-                if src:
-                    removable_sources.add(src)
-                    by_source[src] += 1
+                if source_file:
+                    removable_sources.add(source_file)
+                    by_source[source_file] += 1
 
         report: SyncReport = {
             **counts,
@@ -278,15 +299,17 @@ def sync_palace(
             logger.warning("Closet purge skipped (collection unavailable): %s", exc)
 
         closets_removed = 0
-        if closets_col is not None:
-            for source_file in removable_sources:
-                before = (
-                    closets_col.get(where={"source_file": source_file}, include=[]).get("ids") or []
-                )
-                if not before:
-                    continue
-                purge_file_closets(closets_col, source_file)
-                closets_removed += len(before)
+        if closets_col is not None and removable_sources:
+            closet_ids = (
+                closets_col.get(
+                    where={"source_file": {"$in": list(removable_sources)}},
+                    include=[],
+                ).get("ids")
+                or []
+            )
+            if closet_ids:
+                closets_col.delete(ids=closet_ids)
+                closets_removed = len(closet_ids)
         report["removed_closets"] = closets_removed
     return report
 
