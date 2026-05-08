@@ -208,6 +208,93 @@ def _try_acquire_expect_busy(palace_path, result_q):
         result_q.put("busy")
 
 
+def _hold_lock_send_pid(palace_path: str, ready_flag: str, release_flag: str, pid_q) -> None:
+    """Acquire the lock, push our PID + cmdline through the queue, then wait."""
+    import sys as _sys
+
+    try:
+        with mine_palace_lock(palace_path):
+            pid_q.put((os.getpid(), list(_sys.argv[:3])))
+            open(ready_flag, "w").close()
+            for _ in range(500):
+                if os.path.exists(release_flag):
+                    return
+                time.sleep(0.01)
+    except MineAlreadyRunning:
+        pid_q.put(("error", "raised"))
+
+
+def test_lock_failure_message_names_holder(tmp_path, monkeypatch):
+    """Regression #1264: failed acquire must identify the holder by PID.
+
+    Before this fix, a `mempalace mine` colliding with another writer
+    (mine, MCP server, anything taking mine_palace_lock) saw a generic
+    "another `mempalace mine` is already running" message and exited
+    silently. The operator had no signal of which process to wait for
+    or stop. The new message includes ``PID N`` so the holder can be
+    identified directly.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    palace = str(tmp_path / "palace")
+    ready = str(tmp_path / "ready")
+    release = str(tmp_path / "release")
+
+    ctx = _get_mp_context()
+    pid_q = ctx.Queue()
+    holder = ctx.Process(target=_hold_lock_send_pid, args=(palace, ready, release, pid_q))
+    holder.start()
+    try:
+        for _ in range(500):
+            if os.path.exists(ready):
+                break
+            time.sleep(0.01)
+        assert os.path.exists(ready), "holder failed to acquire lock in time"
+        holder_pid, _holder_argv = pid_q.get(timeout=2)
+
+        with pytest.raises(MineAlreadyRunning) as excinfo:
+            with mine_palace_lock(palace):
+                pytest.fail("second acquire of same palace should have raised")
+
+        msg = str(excinfo.value)
+        assert (
+            f"PID {holder_pid}" in msg
+        ), f"lock-failure message must name the holder PID; got: {msg!r}"
+    finally:
+        open(release, "w").close()
+        holder.join(timeout=5)
+
+
+def test_lock_holder_identity_persists_across_release(tmp_path, monkeypatch):
+    """The holder line is overwritten by each new acquirer, not appended.
+
+    Without explicit truncate the lock file would accumulate lines across
+    runs and grow without bound. Verify that re-acquire keeps the body
+    bounded.
+    """
+    # ``os.path.expanduser("~")`` reads HOME on POSIX but USERPROFILE on
+    # Windows; setting both makes the ``~/.mempalace/locks`` lookup land
+    # under ``tmp_path`` regardless of platform.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    palace = str(tmp_path / "palace")
+    for _ in range(5):
+        with mine_palace_lock(palace):
+            pass
+
+    # Locate the lock file. The key derivation is internal but we can find
+    # it by scanning the mempalace locks dir for mine_palace_*.lock entries.
+    lock_dir = tmp_path / ".mempalace" / "locks"
+    lock_files = list(lock_dir.glob("mine_palace_*.lock"))
+    assert lock_files, "expected the palace lock file to exist after acquire/release"
+    # Read as bytes so the byte-0 sentinel (\x00) is preserved without
+    # decode quirks; the bound is on the file size, not its line count.
+    body = lock_files[0].read_bytes()
+    # Body is byte-0 sentinel + identity (no trailing accumulation).
+    # Identity is ``f"{pid} {sys.argv[:3]}"``; cap at a generous bound that
+    # still rules out unbounded growth across the 5 re-acquires.
+    assert len(body) < 1024, f"lock body must not grow across re-acquires; got {len(body)} bytes"
+
+
 def test_mine_global_lock_is_alias_for_back_compat(tmp_path, monkeypatch):
     """Old callers of `mine_global_lock` should still work."""
     monkeypatch.setenv("HOME", str(tmp_path))

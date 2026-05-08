@@ -500,31 +500,41 @@ def cmd_mine(args):
             llm_provider=None,
         )
 
-    if args.mode == "convos":
-        from .convo_miner import mine_convos
+    from .palace import MineAlreadyRunning
 
-        mine_convos(
-            convo_dir=args.dir,
-            palace_path=palace_path,
-            wing=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            extract_mode=args.extract,
-        )
-    else:
-        from .miner import mine
+    try:
+        if args.mode == "convos":
+            from .convo_miner import mine_convos
 
-        mine(
-            project_dir=args.dir,
-            palace_path=palace_path,
-            wing_override=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            respect_gitignore=not args.no_gitignore,
-            include_ignored=include_ignored,
-        )
+            mine_convos(
+                convo_dir=args.dir,
+                palace_path=palace_path,
+                wing=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                extract_mode=args.extract,
+            )
+        else:
+            from .miner import mine
+
+            mine(
+                project_dir=args.dir,
+                palace_path=palace_path,
+                wing_override=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                respect_gitignore=not args.no_gitignore,
+                include_ignored=include_ignored,
+            )
+    except MineAlreadyRunning as exc:
+        # A live MCP server or another mine is already writing to this
+        # palace. Surface the holder identity so the operator knows what
+        # to wait for (or stop), and exit non-zero so wrappers like
+        # nohup / scripts can detect the contention.
+        print(f"mempalace: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_sweep(args):

@@ -21,7 +21,6 @@ from typing import Optional
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
-    MineAlreadyRunning,
     build_closet_lines,
     file_already_mined,
     get_closets_collection,
@@ -1035,26 +1034,21 @@ def mine(
             files=files,
         )
 
-    try:
-        with mine_palace_lock(palace_path):
-            return _mine_impl(
-                project_dir,
-                palace_path,
-                wing_override=wing_override,
-                agent=agent,
-                limit=limit,
-                dry_run=dry_run,
-                respect_gitignore=respect_gitignore,
-                include_ignored=include_ignored,
-                files=files,
-            )
-    except MineAlreadyRunning:
-        print(
-            f"mempalace: another `mine` is already running against "
-            f"{palace_path} — exiting cleanly.",
-            file=sys.stderr,
+    # MineAlreadyRunning propagates so the CLI can render a clear holder-aware
+    # message and exit non-zero. In-process callers (tests, library users) that
+    # expect to coexist with another writer should handle the exception.
+    with mine_palace_lock(palace_path):
+        return _mine_impl(
+            project_dir,
+            palace_path,
+            wing_override=wing_override,
+            agent=agent,
+            limit=limit,
+            dry_run=dry_run,
+            respect_gitignore=respect_gitignore,
+            include_ignored=include_ignored,
+            files=files,
         )
-        return
 
 
 def _mine_impl(
