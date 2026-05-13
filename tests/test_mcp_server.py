@@ -40,6 +40,51 @@ def _get_collection(palace_path, create=False):
     return client, client.get_collection("mempalace_drawers")
 
 
+class TestWalPermissions:
+    def test_wal_permission_helper_hardens_existing_file_best_effort(
+        self, tmp_path, monkeypatch
+    ):
+        from mempalace import mcp_server
+
+        wal_dir = tmp_path / "wal"
+        wal_dir.mkdir()
+        wal_file = wal_dir / "write_log.jsonl"
+        wal_file.write_text("", encoding="utf-8")
+        calls = []
+
+        def record_chmod(self, mode):
+            calls.append((self, mode))
+
+        monkeypatch.setattr(type(wal_dir), "chmod", record_chmod)
+        monkeypatch.setattr(mcp_server, "_WAL_DIR", wal_dir)
+        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+
+        mcp_server._ensure_secure_wal_permissions()
+
+        assert (wal_dir, 0o700) in calls
+        assert (wal_file, 0o600) in calls
+
+    def test_wal_log_hardens_before_and_after_append(self, tmp_path, monkeypatch):
+        from mempalace import mcp_server
+
+        wal_file = tmp_path / "write_log.jsonl"
+        calls = []
+        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+        monkeypatch.setattr(
+            mcp_server,
+            "_ensure_secure_wal_permissions",
+            lambda: calls.append("secure"),
+        )
+
+        mcp_server._wal_log("test_operation", {"content": "secret", "safe": "ok"})
+
+        assert calls == ["secure", "secure"]
+        entry = json.loads(wal_file.read_text(encoding="utf-8"))
+        assert entry["operation"] == "test_operation"
+        assert entry["params"]["content"] == "[REDACTED 6 chars]"
+        assert entry["params"]["safe"] == "ok"
+
+
 # ── Protocol Layer ──────────────────────────────────────────────────────
 
 

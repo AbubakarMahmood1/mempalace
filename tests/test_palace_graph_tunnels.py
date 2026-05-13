@@ -40,6 +40,38 @@ class TestTunnelStorage:
         palace_graph._save_tunnels(tunnels)
         assert palace_graph._load_tunnels() == tunnels
 
+    def test_load_tunnels_hardens_existing_file_best_effort(self, tmp_path, monkeypatch):
+        tunnel_file = _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        tunnel_file.write_text("[]", encoding="utf-8")
+        calls = []
+
+        def record_chmod(path, mode):
+            calls.append((os.path.normpath(path), mode))
+
+        monkeypatch.setattr(palace_graph.os, "chmod", record_chmod)
+
+        assert palace_graph._load_tunnels() == []
+        assert (os.path.normpath(str(tunnel_file.parent)), 0o700) in calls
+        assert (os.path.normpath(str(tunnel_file)), 0o600) in calls
+
+    def test_save_tunnels_hardens_temp_and_final_files_best_effort(self, tmp_path, monkeypatch):
+        tunnel_file = _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        calls = []
+
+        def record_chmod(path, mode):
+            calls.append((os.path.normpath(path), mode))
+
+        monkeypatch.setattr(palace_graph.os, "chmod", record_chmod)
+
+        palace_graph._save_tunnels([])
+
+        expected_parent = os.path.normpath(str(tunnel_file.parent))
+        expected_tmp = os.path.normpath(str(tunnel_file) + ".tmp")
+        expected_final = os.path.normpath(str(tunnel_file))
+        assert (expected_parent, 0o700) in calls
+        assert (expected_tmp, 0o600) in calls
+        assert (expected_final, 0o600) in calls
+
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason="POSIX file-permission bits only apply on Unix-like systems",
