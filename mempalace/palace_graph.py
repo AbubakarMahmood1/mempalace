@@ -385,6 +385,13 @@ def _save_tunnels(tunnels):
     _ensure_secure_tunnel_permissions()
     tmp_path = _TUNNEL_FILE + ".tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError, NotImplementedError):
+        try:
+            os.chmod(tmp_path, 0o600)
+        except (OSError, NotImplementedError):
+            pass
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(tunnels, f, indent=2)
         f.flush()

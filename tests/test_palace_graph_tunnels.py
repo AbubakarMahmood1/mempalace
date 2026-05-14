@@ -59,24 +59,40 @@ class TestTunnelStorage:
     ):
         tunnel_file = _use_tmp_tunnel_file(monkeypatch, tmp_path)
         chmod_calls = []
+        events = []
+        fchmod_calls = []
         open_calls = []
+        real_dump = palace_graph.json.dump
         real_open = palace_graph.os.open
 
         def record_chmod(path, mode):
             chmod_calls.append((os.path.normpath(path), mode))
 
+        def record_dump(*args, **kwargs):
+            events.append("dump")
+            return real_dump(*args, **kwargs)
+
+        def record_fchmod(fd, mode):
+            events.append("fchmod")
+            fchmod_calls.append((fd, mode))
+
         def record_open(path, flags, mode=0o777, *args, **kwargs):
+            events.append("open")
             open_calls.append((os.path.normpath(path), flags, mode))
             return real_open(path, flags, mode, *args, **kwargs)
 
         monkeypatch.setattr(palace_graph.os, "chmod", record_chmod)
+        monkeypatch.setattr(palace_graph.os, "fchmod", record_fchmod, raising=False)
         monkeypatch.setattr(palace_graph.os, "open", record_open)
+        monkeypatch.setattr(palace_graph.json, "dump", record_dump)
 
         palace_graph._save_tunnels([])
 
         expected_parent = os.path.normpath(str(tunnel_file.parent))
         expected_tmp = os.path.normpath(str(tunnel_file) + ".tmp")
         assert (expected_parent, 0o700) in chmod_calls
+        assert any(mode == 0o600 for _fd, mode in fchmod_calls)
+        assert events.index("fchmod") < events.index("dump")
         assert any(
             path == expected_tmp
             and flags & os.O_CREAT
