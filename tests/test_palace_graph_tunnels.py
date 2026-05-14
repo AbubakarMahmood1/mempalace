@@ -54,21 +54,36 @@ class TestTunnelStorage:
         assert (os.path.normpath(str(tunnel_file.parent)), 0o700) in calls
         assert (os.path.normpath(str(tunnel_file)), 0o600) in calls
 
-    def test_save_tunnels_hardens_parent_and_temp_file_best_effort(self, tmp_path, monkeypatch):
+    def test_save_tunnels_hardens_parent_and_creates_temp_file_restricted(
+        self, tmp_path, monkeypatch
+    ):
         tunnel_file = _use_tmp_tunnel_file(monkeypatch, tmp_path)
-        calls = []
+        chmod_calls = []
+        open_calls = []
+        real_open = palace_graph.os.open
 
         def record_chmod(path, mode):
-            calls.append((os.path.normpath(path), mode))
+            chmod_calls.append((os.path.normpath(path), mode))
+
+        def record_open(path, flags, mode=0o777, *args, **kwargs):
+            open_calls.append((os.path.normpath(path), flags, mode))
+            return real_open(path, flags, mode, *args, **kwargs)
 
         monkeypatch.setattr(palace_graph.os, "chmod", record_chmod)
+        monkeypatch.setattr(palace_graph.os, "open", record_open)
 
         palace_graph._save_tunnels([])
 
         expected_parent = os.path.normpath(str(tunnel_file.parent))
         expected_tmp = os.path.normpath(str(tunnel_file) + ".tmp")
-        assert (expected_parent, 0o700) in calls
-        assert (expected_tmp, 0o600) in calls
+        assert (expected_parent, 0o700) in chmod_calls
+        assert any(
+            path == expected_tmp
+            and flags & os.O_CREAT
+            and flags & os.O_TRUNC
+            and mode == 0o600
+            for path, flags, mode in open_calls
+        )
 
     @pytest.mark.skipif(
         sys.platform == "win32",

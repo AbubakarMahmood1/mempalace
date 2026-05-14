@@ -384,7 +384,8 @@ def _save_tunnels(tunnels):
     os.makedirs(os.path.dirname(_TUNNEL_FILE), exist_ok=True)
     _ensure_secure_tunnel_permissions()
     tmp_path = _TUNNEL_FILE + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(tunnels, f, indent=2)
         f.flush()
         try:
@@ -392,10 +393,6 @@ def _save_tunnels(tunnels):
         except OSError:
             # Not all filesystems (or Windows file handles) support fsync — tolerate.
             pass
-    try:
-        os.chmod(tmp_path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
     os.replace(tmp_path, _TUNNEL_FILE)
 
 
