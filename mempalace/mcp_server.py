@@ -325,7 +325,6 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         fd = os.open(str(_WAL_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
-        _ensure_secure_wal_permissions()
     except Exception as e:
         logger.error(f"WAL write failed: {e}")
 

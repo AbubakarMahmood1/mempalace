@@ -397,7 +397,6 @@ def _save_tunnels(tunnels):
     except (OSError, NotImplementedError):
         pass
     os.replace(tmp_path, _TUNNEL_FILE)
-    _ensure_secure_tunnel_permissions()
 
 
 def _endpoint_key(wing: str, room: str) -> str:

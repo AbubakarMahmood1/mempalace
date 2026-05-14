@@ -54,7 +54,7 @@ class TestTunnelStorage:
         assert (os.path.normpath(str(tunnel_file.parent)), 0o700) in calls
         assert (os.path.normpath(str(tunnel_file)), 0o600) in calls
 
-    def test_save_tunnels_hardens_temp_and_final_files_best_effort(self, tmp_path, monkeypatch):
+    def test_save_tunnels_hardens_parent_and_temp_file_best_effort(self, tmp_path, monkeypatch):
         tunnel_file = _use_tmp_tunnel_file(monkeypatch, tmp_path)
         calls = []
 
@@ -67,10 +67,8 @@ class TestTunnelStorage:
 
         expected_parent = os.path.normpath(str(tunnel_file.parent))
         expected_tmp = os.path.normpath(str(tunnel_file) + ".tmp")
-        expected_final = os.path.normpath(str(tunnel_file))
         assert (expected_parent, 0o700) in calls
         assert (expected_tmp, 0o600) in calls
-        assert (expected_final, 0o600) in calls
 
     @pytest.mark.skipif(
         sys.platform == "win32",
